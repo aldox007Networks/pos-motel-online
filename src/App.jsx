@@ -76,6 +76,8 @@ export default function App() {
   const [loginU, setLoginU] = useState("");
   const [loginP, setLoginP] = useState("");
   const [loginErr, setLoginErr] = useState("");
+  const [verPass, setVerPass] = useState(false);
+  const [verPassUser, setVerPassUser] = useState(false);
   const [bootstrap, setBootstrap] = useState(false); // crear primer admin
 
   /* ---------- datos ---------- */
@@ -436,28 +438,64 @@ export default function App() {
   };
 
   /* ============ USUARIOS (admin) ============ */
+  const llamarAdminFn = async (payload) => {
+    const { data: sesion } = await supabase.auth.getSession();
+    const token = sesion?.session?.access_token;
+    const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-usuarios`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    const json = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(json.error || "Error del servidor");
+    return json;
+  };
+
   const guardarUsuario = async () => {
     setErrorMsg("");
     if (!userForm.usuario || !userForm.nombre) return;
-    if (userForm.id) {
-      const { error } = await supabase.from("perfiles")
-        .update({ nombre: userForm.nombre.trim(), rol: userForm.rol, sucursal: userForm.sucursal })
-        .eq("id", userForm.id);
-      if (error) { setErrorMsg("No se pudo actualizar: " + error.message); return; }
-    } else {
-      if ((userForm.passNueva || "").length < 6) { setErrorMsg("La contraseña debe tener al menos 6 caracteres."); return; }
-      const { data, error } = await supabaseAlta.auth.signUp({
-        email: usuarioAEmail(userForm.usuario),
-        password: userForm.passNueva,
-      });
-      if (error || !data.user) { setErrorMsg("No se pudo crear el usuario: " + (error?.message || "")); return; }
-      const { error: e2 } = await supabase.from("perfiles").insert({
-        id: data.user.id, usuario: userForm.usuario.trim().toLowerCase(),
-        nombre: userForm.nombre.trim(), rol: userForm.rol, sucursal: userForm.sucursal,
-      });
-      if (e2) { setErrorMsg("Usuario creado pero falló el perfil: " + e2.message); return; }
+    try {
+      if (userForm.id) {
+        // Editar: usa la Edge Function (permite cambiar usuario/contraseña de forma segura)
+        await llamarAdminFn({
+          accion: "actualizar",
+          id: userForm.id,
+          usuario: userForm.usuario.trim().toLowerCase(),
+          nombre: userForm.nombre.trim(),
+          rol: userForm.rol,
+          sucursal: userForm.sucursal,
+          ...(userForm.passNueva ? { password: userForm.passNueva } : {}),
+        });
+      } else {
+        // Crear: signUp con cliente secundario para no perder la sesión del admin
+        if ((userForm.passNueva || "").length < 6) { setErrorMsg("La contraseña debe tener al menos 6 caracteres."); return; }
+        const { data, error } = await supabaseAlta.auth.signUp({
+          email: usuarioAEmail(userForm.usuario),
+          password: userForm.passNueva,
+        });
+        if (error || !data.user) { setErrorMsg("No se pudo crear el usuario: " + (error?.message || "")); return; }
+        const { error: e2 } = await supabase.from("perfiles").insert({
+          id: data.user.id, usuario: userForm.usuario.trim().toLowerCase(),
+          nombre: userForm.nombre.trim(), rol: userForm.rol, sucursal: userForm.sucursal,
+        });
+        if (e2) { setErrorMsg("Usuario creado pero falló el perfil: " + e2.message); return; }
+      }
+      setUserForm(null); cargarPerfiles();
+    } catch (err) {
+      setErrorMsg("No se pudo guardar: " + (err?.message || ""));
     }
-    setUserForm(null); cargarPerfiles();
+  };
+
+  const eliminarUsuario = async (u) => {
+    if (u.id === perfil.id) { setErrorMsg("No puedes eliminar tu propio usuario."); return; }
+    if (!window.confirm(`¿Eliminar definitivamente a "${u.nombre}" (${u.usuario})? Esta acción no se puede deshacer.`)) return;
+    setErrorMsg("");
+    try {
+      await llamarAdminFn({ accion: "eliminar", id: u.id });
+      setUserForm(null); cargarPerfiles();
+    } catch (err) {
+      setErrorMsg("No se pudo eliminar: " + (err?.message || ""));
+    }
   };
 
   /* ============ ESTADÍSTICAS ============ */
@@ -526,11 +564,18 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           <div style={{ fontSize: 13, color: "#8A93A3", marginBottom: 4 }}>Punto de venta en línea</div>
           <div style={S.turnoBadge}>⏱ {tn.nombre} · {tn.rango}</div>
           <label style={S.label}>Usuario</label>
-          <input style={S.input} value={loginU} onChange={(e) => setLoginU(e.target.value)} autoFocus
+          <input style={S.input} value={loginU} onChange={(e) => setLoginU(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ""))} autoFocus
             onKeyDown={(e) => e.key === "Enter" && (bootstrap ? crearAdminInicial() : entrar())} />
           <label style={S.label}>Contraseña</label>
-          <input style={S.input} type="password" value={loginP} onChange={(e) => setLoginP(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && (bootstrap ? crearAdminInicial() : entrar())} />
+          <div style={{ position: "relative" }}>
+            <input style={{ ...S.input, paddingRight: 44 }} type={verPass ? "text" : "password"} value={loginP}
+              onChange={(e) => setLoginP(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && (bootstrap ? crearAdminInicial() : entrar())} />
+            <button type="button" onClick={() => setVerPass((v) => !v)} style={S.eyeBtn}
+              title={verPass ? "Ocultar contraseña" : "Ver contraseña"}>
+              {verPass ? "🙈" : "👁"}
+            </button>
+          </div>
           {loginErr && <div style={{ color: "#E11D48", fontSize: 13, marginTop: 8 }}>{loginErr}</div>}
           {bootstrap ? (
             <>
@@ -1104,7 +1149,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </tbody>
             </table>
             <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 10 }}>
-              Para restablecer la contraseña de una cajera o eliminar un usuario, hazlo desde el panel de Supabase → Authentication → Users.
+              Presiona "Editar" para cambiar nombre, usuario, contraseña, rol o sucursal, o para eliminar el usuario.
             </div>
           </div>
         </div>
@@ -1117,15 +1162,24 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <label style={S.label}>Nombre completo *</label>
             <input style={S.input} value={userForm.nombre} onChange={(e) => setUserForm({ ...userForm, nombre: e.target.value })} autoFocus />
             <label style={S.label}>Usuario (para iniciar sesión) *</label>
-            <input style={S.input} value={userForm.usuario} disabled={!!userForm.id}
-              onChange={(e) => setUserForm({ ...userForm, usuario: e.target.value })} />
-            {!userForm.id && (
-              <>
-                <label style={S.label}>Contraseña * (mínimo 6 caracteres)</label>
-                <input style={S.input} type="password" value={userForm.passNueva}
-                  onChange={(e) => setUserForm({ ...userForm, passNueva: e.target.value })} />
-              </>
-            )}
+            <input style={S.input} value={userForm.usuario}
+              placeholder="ej. cajera1 (sin espacios)"
+              onChange={(e) => setUserForm({ ...userForm, usuario: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "") })} />
+            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 4 }}>
+              Solo letras, números y guion bajo. Sin espacios ni acentos.
+            </div>
+            <label style={S.label}>
+              {userForm.id ? "Nueva contraseña (dejar vacío = no cambiar)" : "Contraseña * (mínimo 6 caracteres)"}
+            </label>
+            <div style={{ position: "relative" }}>
+              <input style={{ ...S.input, paddingRight: 44 }} type={verPassUser ? "text" : "password"} value={userForm.passNueva}
+                placeholder={userForm.id ? "Escribe solo si deseas cambiarla" : ""}
+                onChange={(e) => setUserForm({ ...userForm, passNueva: e.target.value })} />
+              <button type="button" onClick={() => setVerPassUser((v) => !v)} style={S.eyeBtn}
+                title={verPassUser ? "Ocultar contraseña" : "Ver contraseña"}>
+                {verPassUser ? "🙈" : "👁"}
+              </button>
+            </div>
             <label style={S.label}>Rol</label>
             <div style={{ display: "flex", gap: 8 }}>
               {["cajera", "admin"].map((r) => (
@@ -1140,9 +1194,14 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                   onClick={() => setUserForm({ ...userForm, sucursal: k })}>{s.corto}</button>
               ))}
             </div>
-            <div style={S.modalActions}>
-              <button style={S.ghostBtn} onClick={() => setUserForm(null)}>Cancelar</button>
-              <button style={S.payBtn} onClick={guardarUsuario}>💾 Guardar usuario</button>
+            <div style={{ ...S.modalActions, justifyContent: "space-between" }}>
+              {userForm.id && userForm.id !== perfil.id ? (
+                <button style={S.deleteBtn} onClick={() => eliminarUsuario(userForm)}>🗑️ Eliminar usuario</button>
+              ) : <span />}
+              <div style={{ display: "flex", gap: 10 }}>
+                <button style={S.ghostBtn} onClick={() => setUserForm(null)}>Cancelar</button>
+                <button style={S.payBtn} onClick={guardarUsuario}>💾 Guardar</button>
+              </div>
             </div>
           </div>
         </div>
@@ -1202,6 +1261,7 @@ const S = {
   payBtn: { background: "#0E9F6E", color: "#fff", border: "none", borderRadius: 10, padding: "14px 26px", fontSize: 17, fontWeight: 800, cursor: "pointer" },
   corteBtn: { background: "transparent", color: "#FCA311", border: "2px solid #FCA311", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 800, cursor: "pointer" },
   ghostBtn: { background: "#fff", color: "#455", border: "1px solid #D7DCE5", borderRadius: 10, padding: "12px 20px", fontSize: 15, cursor: "pointer" },
+  deleteBtn: { background: "#FFF1F2", color: "#E11D48", border: "1px solid #FECDD3", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
 
   panelTitle: { fontSize: 12, textTransform: "uppercase", letterSpacing: 2, color: "#667", fontWeight: 700 },
   quickGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10 },
@@ -1217,6 +1277,7 @@ const S = {
   methodOn: { borderColor: "#0E9F6E", background: "#F0FDF4", color: "#0E9F6E" },
   label: { fontSize: 12, fontWeight: 700, color: "#667", display: "block", margin: "10px 0 4px", textTransform: "uppercase", letterSpacing: 1, textAlign: "left" },
   input: { width: "100%", padding: "10px 12px", fontSize: 15, border: "1px solid #D7DCE5", borderRadius: 8, boxSizing: "border-box" },
+  eyeBtn: { position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", fontSize: 18, padding: "4px 6px", lineHeight: 1 },
   bigInput: { width: "100%", padding: "12px 14px", fontSize: 26, border: "2px solid #D7DCE5", borderRadius: 10, boxSizing: "border-box", fontFamily: "ui-monospace, monospace" },
   formRow: { display: "flex", gap: 10 },
 
