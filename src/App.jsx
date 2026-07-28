@@ -625,6 +625,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <button key={k} onClick={(e) => { e.stopPropagation(); setView(k); }}
               style={{ ...S.navBtn, ...(view === k ? S.navBtnOn : {}) }}>{label}</button>
           ))}
+          <button onClick={(e) => { e.stopPropagation(); cerrarTurno(); }}
+            style={S.corteNavBtn} title="Generar el corte de todas las ventas del turno">
+            🗂️ Corte de turno
+          </button>
         </nav>
         <div style={{ textAlign: "right" }}>
           <div style={{ fontSize: 13, fontWeight: 700 }}>{perfil.nombre} <span style={S.rolPill}>{perfil.rol}</span></div>
@@ -749,8 +753,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <div style={S.totalBar}>
               <div><div style={S.totalLabel}>TOTAL (EFECTIVO)</div><div style={S.totalAmt}>{money(total)}</div></div>
               <div style={{ display: "flex", gap: 10 }}>
-                <button style={S.corteBtn} onClick={(e) => { e.stopPropagation(); cerrarTurno(); }}>🗂️ Corte de turno</button>
-                <button style={{ ...S.payBtn, opacity: cart.length ? 1 : 0.4 }} disabled={!cart.length}
+                <button style={{ ...S.payBtn, padding: "16px 44px", fontSize: 20, opacity: cart.length ? 1 : 0.4 }} disabled={!cart.length}
                   onClick={(e) => { e.stopPropagation(); setConfirmVenta(true); }}>
                   COBRAR
                 </button>
@@ -1260,6 +1263,7 @@ const S = {
   totalAmt: { fontSize: 34, fontWeight: 800, fontFamily: "ui-monospace, monospace" },
   payBtn: { background: "#0E9F6E", color: "#fff", border: "none", borderRadius: 10, padding: "14px 26px", fontSize: 17, fontWeight: 800, cursor: "pointer" },
   corteBtn: { background: "transparent", color: "#FCA311", border: "2px solid #FCA311", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 800, cursor: "pointer" },
+  corteNavBtn: { background: "transparent", color: "#FCA311", border: "1px solid #FCA311", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", marginLeft: 8 },
   ghostBtn: { background: "#fff", color: "#455", border: "1px solid #D7DCE5", borderRadius: 10, padding: "12px 20px", fontSize: 15, cursor: "pointer" },
   deleteBtn: { background: "#FFF1F2", color: "#E11D48", border: "1px solid #FECDD3", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
 
