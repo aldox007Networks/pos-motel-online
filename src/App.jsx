@@ -805,7 +805,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </div>
               <hr style={S.hr} />
               {(ticketListo.items || []).map((it) => (
-                <div key={it.id} style={S.tkRow}><span>{it.cant} × {it.nombre}</span><span>{money(it.precio * it.cant)}</span></div>
+                <div key={it.id} style={S.tkRow}><span style={{ flex: 1, marginRight: 6 }}>{it.cant} × {it.nombre}</span><span style={{ whiteSpace: "nowrap" }}>{money(it.precio * it.cant)}</span></div>
               ))}
               <hr style={S.hr} />
               <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>TOTAL</span><span>{money(ticketListo.total)}</span></div>
@@ -1285,8 +1285,8 @@ const S = {
   bigInput: { width: "100%", padding: "12px 14px", fontSize: 26, border: "2px solid #D7DCE5", borderRadius: 10, boxSizing: "border-box", fontFamily: "ui-monospace, monospace" },
   formRow: { display: "flex", gap: 10 },
 
-  ticket: { fontFamily: "ui-monospace, monospace", fontSize: 13, background: "#fff", padding: 12 },
-  tkRow: { display: "flex", justifyContent: "space-between", gap: 10, margin: "3px 0" },
+  ticket: { fontFamily: "ui-monospace, monospace", fontSize: 13, background: "#fff", padding: 12, width: "100%", boxSizing: "border-box" },
+  tkRow: { display: "flex", justifyContent: "space-between", gap: 8, margin: "3px 0", alignItems: "baseline" },
   hr: { border: "none", borderTop: "1px dashed #999", margin: "8px 0" },
   labelBox: { textAlign: "center", border: "1px dashed #999", borderRadius: 8, padding: 14, background: "#fff" },
 
@@ -1318,9 +1318,19 @@ const CSS = `
     div[style*="grid-template-columns: 1fr 1fr"] { grid-template-columns: 1fr !important; }
   }
   @media print {
+    @page { size: 80mm auto; margin: 0; }
+    html, body { margin: 0 !important; padding: 0 !important; width: 80mm; background: #fff; }
     body * { visibility: hidden; }
     #print-area, #print-area * { visibility: visible; }
-    #print-area { position: fixed; left: 0; top: 0; width: 74mm; }
+    #print-area {
+      position: absolute; left: 0; top: 0;
+      width: 76mm;
+      padding: 2mm 2mm 6mm 2mm;
+      box-sizing: border-box;
+      font-size: 12px;
+      -webkit-print-color-adjust: exact; print-color-adjust: exact;
+    }
+    #print-area * { max-width: 100%; word-wrap: break-word; }
     .no-print { display: none !important; }
   }
 `;
