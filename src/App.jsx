@@ -520,7 +520,48 @@ export default function App() {
   const diasSin = (ultima) => (ultima ? Math.floor((Date.now() - new Date(ultima)) / 86400000) : null);
 
   const stockColor = (p) => (p.stock <= 0 ? "#E11D48" : p.stock <= p.stock_min ? "#D97706" : "#0E9F6E");
-  const imprimir = () => { try { window.print(); } catch (e) { console.error(e); } };
+  const imprimir = () => {
+    try {
+      const area = document.getElementById("print-area");
+      if (!area) { window.print(); return; }
+      const iframe = document.createElement("iframe");
+      iframe.style.position = "fixed";
+      iframe.style.right = "0";
+      iframe.style.bottom = "0";
+      iframe.style.width = "0";
+      iframe.style.height = "0";
+      iframe.style.border = "0";
+      document.body.appendChild(iframe);
+      const doc = iframe.contentWindow.document;
+      doc.open();
+      doc.write(`<!doctype html><html><head><meta charset="utf-8">
+        <style>
+          @page { margin: 0; }
+          html, body { margin: 0; padding: 0; }
+          #ticket {
+            width: 72mm;
+            padding: 2mm;
+            box-sizing: border-box;
+            font-family: ui-monospace, "Courier New", monospace;
+            font-size: 12px;
+            color: #000;
+          }
+          #ticket * { max-width: 100%; word-wrap: break-word; }
+          .tk-row { display: flex; justify-content: space-between; gap: 8px; margin: 3px 0; align-items: baseline; }
+          .tk-row span:last-child { white-space: nowrap; }
+          hr { border: none; border-top: 1px dashed #000; margin: 8px 0; }
+        </style></head>
+        <body><div id="ticket">${area.innerHTML}</div></body></html>`);
+      doc.close();
+      const win = iframe.contentWindow;
+      const limpiar = () => setTimeout(() => document.body.removeChild(iframe), 1000);
+      win.onafterprint = limpiar;
+      setTimeout(() => { win.focus(); win.print(); limpiar(); }, 250);
+    } catch (e) {
+      console.error(e);
+      window.print();
+    }
+  };
 
   const historial = tickets.filter((t) => {
     const q = busquedaTicket.trim().toLowerCase();
@@ -1318,19 +1359,6 @@ const CSS = `
     div[style*="grid-template-columns: 1fr 1fr"] { grid-template-columns: 1fr !important; }
   }
   @media print {
-    @page { margin: 0; }
-    html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
-    body * { visibility: hidden; }
-    #print-area, #print-area * { visibility: visible; }
-    #print-area {
-      position: absolute; left: 0; top: 0;
-      width: 72mm;
-      padding: 0 2mm;
-      box-sizing: border-box;
-      font-size: 12px;
-      -webkit-print-color-adjust: exact; print-color-adjust: exact;
-    }
-    #print-area * { max-width: 100%; word-wrap: break-word; }
     .no-print { display: none !important; }
   }
 `;
