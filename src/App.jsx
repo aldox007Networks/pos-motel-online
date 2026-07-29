@@ -1318,14 +1318,14 @@ const CSS = `
     div[style*="grid-template-columns: 1fr 1fr"] { grid-template-columns: 1fr !important; }
   }
   @media print {
-    @page { size: 80mm auto; margin: 0; }
-    html, body { margin: 0 !important; padding: 0 !important; width: 80mm; background: #fff; }
+    @page { margin: 0; }
+    html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
     body * { visibility: hidden; }
     #print-area, #print-area * { visibility: visible; }
     #print-area {
       position: absolute; left: 0; top: 0;
-      width: 76mm;
-      padding: 2mm 2mm 6mm 2mm;
+      width: 72mm;
+      padding: 0 2mm;
       box-sizing: border-box;
       font-size: 12px;
       -webkit-print-color-adjust: exact; print-color-adjust: exact;
