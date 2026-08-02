@@ -10,8 +10,8 @@ import { supabase, supabaseAlta, usuarioAEmail, configurado } from "./supabase.j
    ============================================================ */
 
 const SUCURSALES = {
-  barcelona: { nombre: "MOTEL BARCELONA", corto: "Barcelona", color: "#7B2D26" },
-  amsterdam: { nombre: "MOTEL AMSTERDAM", corto: "Amsterdam", color: "#B8860B" },
+  barcelona: { nombre: "MOTEL BARCELONA", corto: "Barcelona", color: "#7B2D26", habitaciones: 34 },
+  amsterdam: { nombre: "MOTEL AMSTERDAM", corto: "Amsterdam", color: "#B8860B", habitaciones: 17 },
 };
 const SUC_ENV = (import.meta.env.VITE_SUCURSAL || "").toLowerCase();
 
@@ -93,6 +93,7 @@ export default function App() {
 
   /* ---------- venta ---------- */
   const [cart, setCart] = useState([]);
+  const [habitacion, setHabitacion] = useState(null); // número de habitación o "mostrador"
   const [scan, setScan] = useState("");
   const [flash, setFlash] = useState(null);
   const [confirmVenta, setConfirmVenta] = useState(false);
@@ -234,8 +235,8 @@ export default function App() {
 
   /* ============ FOCO DEL LECTOR ============ */
   const refocus = useCallback(() => {
-    if (perfil && view === "ventas" && !confirmVenta && !ticketListo && !corteVista && scanRef.current) scanRef.current.focus();
-  }, [perfil, view, confirmVenta, ticketListo, corteVista]);
+    if (perfil && view === "ventas" && habitacion && !confirmVenta && !ticketListo && !corteVista && scanRef.current) scanRef.current.focus();
+  }, [perfil, view, habitacion, confirmVenta, ticketListo, corteVista]);
   useEffect(() => { refocus(); const t = setInterval(refocus, 1500); return () => clearInterval(t); }, [refocus]);
 
   /* ============ CARRITO ============ */
@@ -276,7 +277,10 @@ export default function App() {
         .eq("sucursal", sucursal).order("folio", { ascending: false }).limit(1);
       const folio = (ult?.[0]?.folio || 0) + 1;
       const t = {
-        sucursal, folio, items: cart, total,
+        sucursal, folio,
+        items: cart,
+        habitacion: habitacion === "mostrador" ? "Empleado/Mostrador" : `Habitación ${habitacion}`,
+        total,
         cajera: perfil.nombre, turno: turnoActual(), cancelado: false, corte_id: null,
       };
       const { data, error } = await supabase.from("tickets").insert(t).select().single();
@@ -292,6 +296,7 @@ export default function App() {
       }));
       setTickets((ts) => [data, ...ts]);
       setCart([]); setConfirmVenta(false); setTicketListo(data);
+      setHabitacion(null); // volver al panel de habitaciones
     } catch (err) {
       setErrorMsg("No se pudo registrar la venta: " + (err?.message || "sin conexión"));
     }
@@ -520,6 +525,77 @@ export default function App() {
   const diasSin = (ultima) => (ultima ? Math.floor((Date.now() - new Date(ultima)) / 86400000) : null);
 
   const stockColor = (p) => (p.stock <= 0 ? "#E11D48" : p.stock <= p.stock_min ? "#D97706" : "#0E9F6E");
+  /* ---------- agente de impresión local ---------- */
+  const AGENTE_URL = "http://127.0.0.1:9110";
+  const [agenteOk, setAgenteOk] = useState(false);
+  useEffect(() => {
+    let vivo = true;
+    const revisar = () => {
+      fetch(AGENTE_URL + "/ping", { signal: AbortSignal.timeout(1500) })
+        .then((r) => r.json()).then((d) => { if (vivo) setAgenteOk(!!d.ok); })
+        .catch(() => { if (vivo) setAgenteOk(false); });
+    };
+    revisar();
+    const t = setInterval(revisar, 20000);
+    return () => { vivo = false; clearInterval(t); };
+  }, []);
+
+  // convierte un ticket de venta a líneas ESC/POS para el agente
+  const ticketALineas = (t) => {
+    const suc = SUCURSALES[t.sucursal];
+    const L = [
+      { t: suc.nombre, align: "center", bold: true, size: 2 },
+      { t: `Ticket #${String(t.folio).padStart(4, "0")}`, align: "center" },
+      { t: fechaLarga(t.fecha), align: "center" },
+      { t: `Atendio: ${t.cajera} - Turno ${t.turno}`, align: "center" },
+    ];
+    if (t.habitacion) L.push({ t: t.habitacion, align: "center", bold: true, size: 2 });
+    L.push({ hr: true });
+    (t.items || []).forEach((it) =>
+      L.push({ row: [`${it.cant} x ${it.nombre}`, money(it.precio * it.cant).replace("MX$", "$")] }));
+    L.push({ hr: true });
+    L.push({ row: ["TOTAL", money(t.total).replace("MX$", "$")], bold: true, size: 2 });
+    L.push({ feed: 1 });
+    L.push({ t: "Gracias por su preferencia!", align: "center" });
+    return L;
+  };
+
+  // convierte un corte a líneas ESC/POS
+  const corteALineas = (c) => {
+    const suc = SUCURSALES[c.sucursal];
+    const tn = TURNOS.find((t) => t.n === c.turno) || TURNOS[0];
+    const L = [
+      { t: suc.nombre, align: "center", bold: true, size: 2 },
+      { t: "CORTE DE CAJA (EFECTIVO)", align: "center", bold: true },
+      { t: fechaLarga(c.fecha), align: "center" },
+      { t: `${tn.nombre} (${tn.rango})`, align: "center" },
+      { t: `Cajera: ${c.cajera}`, align: "center" },
+      { hr: true },
+      { row: ["TOTAL EFECTIVO", money(c.total).replace("MX$", "$")], bold: true, size: 2 },
+      { row: ["Ventas", String(c.num_ventas)] },
+      { row: ["Canceladas", String(c.cancelados)] },
+      { hr: true },
+      { t: "INVENTARIO QUE SE ENTREGA", align: "center", bold: true },
+    ];
+    (c.inventario || []).forEach((p) => L.push({ row: [p.nombre, `${p.stock} u`] }));
+    L.push({ feed: 2 });
+    L.push({ t: "Entrega: ______________________" });
+    L.push({ feed: 1 });
+    L.push({ t: "Recibe:  ______________________" });
+    L.push({ feed: 1 });
+    L.push({ t: "Vo.Bo.:  ______________________" });
+    return L;
+  };
+
+  const imprimirPorAgente = async (lineas, abrirGaveta = false) => {
+    const r = await fetch(AGENTE_URL + "/imprimir", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lineas, abrirGaveta }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "Error del agente");
+  };
+
   const imprimir = () => {
     try {
       const area = document.getElementById("print-area");
@@ -601,8 +677,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
         <style>{CSS}</style>
         <div style={S.loginCard}>
           <div style={S.loginLogo}>▮▯▮</div>
-          <div style={{ fontWeight: 800, fontSize: 20, letterSpacing: 1 }}>{marca ? marca.nombre : "POS MOTELES"}</div>
-          <div style={{ fontSize: 13, color: "#8A93A3", marginBottom: 4 }}>Punto de venta en línea</div>
+          <div style={{ fontWeight: 800, fontSize: 28, letterSpacing: 1 }}>iPOS</div>
+          <div style={{ fontSize: 13, color: "#8A93A3", marginBottom: 4 }}>
+            {marca ? `Punto de venta · ${marca.corto}` : "Punto de venta en línea"}
+          </div>
           <div style={S.turnoBadge}>⏱ {tn.nombre} · {tn.rango}</div>
           <label style={S.label}>Usuario</label>
           <input style={S.input} value={loginU} onChange={(e) => setLoginU(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ""))} autoFocus
@@ -674,7 +752,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
         <div style={{ textAlign: "right" }}>
           <div style={{ fontSize: 13, fontWeight: 700 }}>{perfil.nombre} <span style={S.rolPill}>{perfil.rol}</span></div>
           <div style={{ fontSize: 11, color: "#B8C0D0" }}>
-            T{turnoActual()} · en línea ·{" "}
+            T{turnoActual()} · en línea · {agenteOk ? "🖨️ directa" : "🖨️ navegador"} ·{" "}
             <button onClick={(e) => { e.stopPropagation(); salir(); }} style={S.linkBtn}>Cerrar sesión</button>
           </div>
         </div>
@@ -740,7 +818,38 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       )}
 
       {/* ==================== VENTAS ==================== */}
-      {view === "ventas" && (
+      {view === "ventas" && !habitacion && (
+        <div style={S.page} className="no-print">
+          <div style={{ textAlign: "center", marginBottom: 8 }}>
+            <div style={{ fontSize: 22, fontWeight: 800 }}>Selecciona la habitación</div>
+            <div style={{ fontSize: 14, color: "#8A93A3" }}>Toca el número de habitación para iniciar la venta</div>
+          </div>
+          <button style={S.mostradorBtn} onClick={(e) => { e.stopPropagation(); setHabitacion("mostrador"); }}>
+            🧾 Venta a Empleado / Mostrador
+          </button>
+          <div style={S.habGrid}>
+            {Array.from({ length: marcaActiva.habitaciones }, (_, i) => i + 1).map((n) => (
+              <button key={n} style={{ ...S.habBtn, borderColor: marcaActiva.color }}
+                onClick={(e) => { e.stopPropagation(); setHabitacion(n); }}>
+                {n}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {view === "ventas" && habitacion && (
+        <div style={{ ...S.habBar }} className="no-print">
+          <span style={{ fontWeight: 700 }}>
+            {habitacion === "mostrador" ? "🧾 Empleado / Mostrador" : `🚪 Habitación ${habitacion}`}
+          </span>
+          <button style={S.cambiarHabBtn} onClick={(e) => { e.stopPropagation(); if (!cart.length || window.confirm("Hay productos en el ticket. ¿Cambiar de habitación y vaciarlo?")) { setCart([]); setHabitacion(null); } }}>
+            ← Cambiar habitación
+          </button>
+        </div>
+      )}
+
+      {view === "ventas" && habitacion && (
         <div style={S.ventasGrid} className="no-print">
           <section style={S.col}>
             <div style={{ ...S.scanBox, ...(flash ? (flash.error ? S.scanErr : S.scanOk) : {}) }}>
@@ -844,6 +953,11 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 Ticket #{String(ticketListo.folio).padStart(4, "0")} · {fechaLarga(ticketListo.fecha)}<br />
                 Atendió: {ticketListo.cajera} · Turno {ticketListo.turno}
               </div>
+              {ticketListo.habitacion && (
+                <div style={{ textAlign: "center", fontWeight: 800, fontSize: 15, marginTop: 6 }}>
+                  {ticketListo.habitacion}
+                </div>
+              )}
               <hr style={S.hr} />
               {(ticketListo.items || []).map((it) => (
                 <div key={it.id} style={S.tkRow}><span style={{ flex: 1, marginRight: 6 }}>{it.cant} × {it.nombre}</span><span style={{ whiteSpace: "nowrap" }}>{money(it.precio * it.cant)}</span></div>
@@ -854,7 +968,13 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             </div>
             <div style={S.modalActions} className="no-print">
               <button style={S.ghostBtn} onClick={() => { setTicketListo(null); refocus(); }}>Siguiente cliente</button>
-              <button style={S.payBtn} onClick={imprimir}>🖨️ Imprimir ticket</button>
+              <button style={S.payBtn} onClick={async () => {
+                if (agenteOk) {
+                  try { await imprimirPorAgente(ticketALineas(ticketListo), true); return; }
+                  catch (e) { setErrorMsg("Agente: " + e.message + " — usando impresión del navegador."); }
+                }
+                imprimir();
+              }}>🖨️ Imprimir ticket</button>
             </div>
           </div>
         </div>
@@ -889,7 +1009,13 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <div style={S.modalActions} className="no-print">
               <button style={S.ghostBtn} onClick={() => { setCorteVista(null); refocus(); }}>Cerrar</button>
               {esAdmin && <button style={S.ghostBtn} onClick={() => descargarCorte(corteVista)}>⬇ Descargar</button>}
-              <button style={S.payBtn} onClick={imprimir}>🖨️ Imprimir corte</button>
+              <button style={S.payBtn} onClick={async () => {
+                if (agenteOk) {
+                  try { await imprimirPorAgente(corteALineas(corteVista), false); return; }
+                  catch (e) { setErrorMsg("Agente: " + e.message + " — usando impresión del navegador."); }
+                }
+                imprimir();
+              }}>🖨️ Imprimir corte</button>
             </div>
           </div>
         </div>
@@ -1115,12 +1241,13 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <input value={busquedaTicket} onChange={(e) => setBusquedaTicket(e.target.value)}
               placeholder="Buscar por folio, producto o cajera…" style={S.input} />
             <table style={S.table}>
-              <thead><tr><th style={S.th}>Folio</th><th style={S.th}>Fecha</th><th style={S.th}>Cajera</th><th style={S.thC}>Turno</th><th style={S.thR}>Total</th><th style={S.thC}>Estado</th><th style={S.thC}></th></tr></thead>
+              <thead><tr><th style={S.th}>Folio</th><th style={S.th}>Fecha</th><th style={S.th}>Habitación</th><th style={S.th}>Cajera</th><th style={S.thC}>Turno</th><th style={S.thR}>Total</th><th style={S.thC}>Estado</th><th style={S.thC}></th></tr></thead>
               <tbody>
                 {historial.slice(0, 50).map((t) => (
                   <tr key={t.id} style={{ opacity: t.cancelado ? 0.5 : 1 }}>
                     <td style={S.td}>#{String(t.folio).padStart(4, "0")}</td>
                     <td style={S.td}>{String(t.fecha).slice(0, 10)} {horaStr(t.fecha)}</td>
+                    <td style={S.td}>{t.habitacion || "—"}</td>
                     <td style={S.td}>{t.cajera}</td>
                     <td style={{ ...S.td, textAlign: "center" }}>T{t.turno}</td>
                     <td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(t.total)}</td>
@@ -1311,6 +1438,11 @@ const S = {
   panelTitle: { fontSize: 12, textTransform: "uppercase", letterSpacing: 2, color: "#667", fontWeight: 700 },
   quickGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10 },
   quickBtn: { background: "#fff", border: "2px solid #D7DCE5", borderRadius: 14, padding: "14px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, cursor: "pointer", minHeight: 110 },
+  habGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(90px, 1fr))", gap: 12, marginTop: 16 },
+  habBtn: { background: "#fff", border: "3px solid #14213D", borderRadius: 14, padding: "22px 8px", fontSize: 30, fontWeight: 800, cursor: "pointer", color: "#14213D", minHeight: 80 },
+  mostradorBtn: { width: "100%", background: "#14213D", color: "#fff", border: "none", borderRadius: 14, padding: "18px", fontSize: 18, fontWeight: 800, cursor: "pointer", marginTop: 8 },
+  habBar: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#FCA311", color: "#14213D", padding: "10px 18px", margin: "16px 16px 0", borderRadius: 12, fontSize: 16 },
+  cambiarHabBtn: { background: "#14213D", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" },
   quickName: { fontSize: 13, fontWeight: 600, textAlign: "center", lineHeight: 1.2 },
   quickPrice: { fontSize: 13, color: "#0E9F6E", fontWeight: 800 },
 
