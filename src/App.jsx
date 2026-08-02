@@ -679,7 +679,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           <div style={S.loginLogo}>▮▯▮</div>
           <div style={{ fontWeight: 800, fontSize: 28, letterSpacing: 1 }}>iPOS</div>
           <div style={{ fontSize: 13, color: "#8A93A3", marginBottom: 4 }}>
-            {marca ? `Punto de venta · ${marca.corto}` : "Punto de venta en línea"}
+            Punto de venta en línea
           </div>
           <div style={S.turnoBadge}>⏱ {tn.nombre} · {tn.rango}</div>
           <label style={S.label}>Usuario</label>
@@ -706,9 +706,9 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           ) : (
             <>
               <button style={{ ...S.payBtn, width: "100%", marginTop: 16 }} onClick={entrar}>Iniciar turno</button>
-              <button style={{ ...S.linkBtnDark, marginTop: 12 }} onClick={() => { setBootstrap(true); setLoginErr(""); }}>
-                Configuración inicial (crear administrador)
-              </button>
+              <div style={{ marginTop: 16, fontSize: 12, color: "#8A93A3", textAlign: "center" }}>
+                Aldox Networks ®
+              </div>
             </>
           )}
         </div>
