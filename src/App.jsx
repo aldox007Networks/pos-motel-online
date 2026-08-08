@@ -86,6 +86,14 @@ export default function App() {
   const [tickets, setTickets] = useState([]);
   const [cortes, setCortes] = useState([]);
   const [entradas, setEntradas] = useState([]);
+  /* ---------- almacén general ---------- */
+  const [almacen, setAlmacen] = useState([]);
+  const [almacenEntradas, setAlmacenEntradas] = useState([]);
+  const [traspasos, setTraspasos] = useState([]);
+  const [almForm, setAlmForm] = useState(null); // alta/edición de producto de almacén
+  const [almResurtir, setAlmResurtir] = useState(null); // entrada de mercancía al almacén
+  const [traspasar, setTraspasar] = useState(null); // {producto, cantidad, sucursal}
+  const [almFilter, setAlmFilter] = useState("");
   const [perfiles, setPerfiles] = useState([]);
   const [cargando, setCargando] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
@@ -202,6 +210,129 @@ export default function App() {
     setPerfiles(data || []);
   }, []);
   useEffect(() => { if (esAdmin && view === "usuarios") cargarPerfiles(); }, [esAdmin, view, cargarPerfiles]);
+
+  /* ============ ALMACÉN GENERAL ============ */
+  const cargarAlmacen = useCallback(async () => {
+    setErrorMsg("");
+    try {
+      const [a, e, t] = await Promise.all([
+        supabase.from("almacen").select("*").order("nombre"),
+        supabase.from("almacen_entradas").select("*").order("fecha", { ascending: false }).limit(30),
+        supabase.from("traspasos").select("*").order("fecha", { ascending: false }).limit(30),
+      ]);
+      if (a.error || e.error || t.error) throw a.error || e.error || t.error;
+      setAlmacen(a.data); setAlmacenEntradas(e.data); setTraspasos(t.data);
+    } catch (err) {
+      setErrorMsg("No se pudo cargar el almacén: " + (err?.message || ""));
+    }
+  }, []);
+  useEffect(() => { if (esAdmin && view === "almacen") cargarAlmacen(); }, [esAdmin, view, cargarAlmacen]);
+
+  const almSiguienteInterno = useMemo(() => {
+    const nums = almacen.filter((p) => p.interno && /^\d+$/.test(p.codigo)).map((p) => parseInt(p.codigo));
+    return Math.max(1000, ...nums) + 1;
+  }, [almacen]);
+
+  const nuevoAlmProducto = () =>
+    setAlmForm({ id: null, nombre: "", codigo: "", interno: false, stock: "", stock_min: "", stock_max: "", emoji: "📦" });
+
+  const guardarAlmProducto = async () => {
+    if (!almForm.nombre) return;
+    let codigo = almForm.codigo.trim(), interno = almForm.interno;
+    if (!codigo) { codigo = String(almSiguienteInterno); interno = true; }
+    const p = {
+      nombre: almForm.nombre.trim(), codigo, interno,
+      stock: parseInt(almForm.stock) || 0,
+      stock_min: parseInt(almForm.stock_min) || 0, stock_max: parseInt(almForm.stock_max) || 0,
+      emoji: almForm.emoji || "📦",
+    };
+    if (almForm.id) {
+      const { data, error } = await supabase.from("almacen").update(p).eq("id", almForm.id).select().single();
+      if (error) { setErrorMsg("No se pudo guardar: " + error.message); return; }
+      setAlmacen((xs) => xs.map((x) => (x.id === almForm.id ? data : x)));
+    } else {
+      const { data, error } = await supabase.from("almacen").insert(p).select().single();
+      if (error) { setErrorMsg("No se pudo guardar (¿código repetido?): " + error.message); return; }
+      setAlmacen((xs) => [...xs, data].sort((a, b) => a.nombre.localeCompare(b.nombre)));
+    }
+    setAlmForm(null);
+  };
+
+  const eliminarAlmProducto = async (id) => {
+    const { error } = await supabase.from("almacen").delete().eq("id", id);
+    if (error) { setErrorMsg("No se pudo eliminar: " + error.message); return; }
+    setAlmacen((xs) => xs.filter((x) => x.id !== id));
+  };
+
+  const registrarAlmEntrada = async () => {
+    const cant = parseInt(almResurtir.cantidad) || 0;
+    if (cant <= 0) return;
+    const p = almResurtir.producto;
+    const { error } = await supabase.from("almacen").update({ stock: p.stock + cant }).eq("id", p.id);
+    if (error) { setErrorMsg("No se pudo registrar: " + error.message); return; }
+    const ent = {
+      producto_id: p.id, nombre: p.nombre, codigo: p.codigo, cantidad: cant,
+      stock_anterior: p.stock, stock_nuevo: p.stock + cant,
+      usuario: perfil.nombre, nota: almResurtir.nota || "",
+    };
+    const { data } = await supabase.from("almacen_entradas").insert(ent).select().single();
+    setAlmacen((xs) => xs.map((x) => (x.id === p.id ? { ...x, stock: x.stock + cant } : x)));
+    if (data) setAlmacenEntradas((es) => [data, ...es]);
+    setAlmResurtir(null);
+  };
+
+  const ejecutarTraspaso = async () => {
+    setErrorMsg("");
+    const cant = parseInt(traspasar.cantidad) || 0;
+    const p = traspasar.producto;
+    const suc = traspasar.sucursal;
+    if (cant <= 0) return;
+    if (cant > p.stock) { setErrorMsg("No hay suficiente stock en el almacén (disponible: " + p.stock + ")."); return; }
+    if (!suc) { setErrorMsg("Elige la sucursal destino."); return; }
+    try {
+      // 1) buscar el producto en el POS destino por código
+      const { data: existentes, error: e0 } = await supabase.from("productos")
+        .select("*").eq("sucursal", suc).eq("codigo", p.codigo).limit(1);
+      if (e0) throw e0;
+      let creado = false;
+      if (existentes && existentes.length > 0) {
+        // ya existe: sumar stock
+        const destino = existentes[0];
+        const { error } = await supabase.from("productos")
+          .update({ stock: destino.stock + cant }).eq("id", destino.id);
+        if (error) throw error;
+      } else {
+        // no existe: crear con precio 0 (el admin de esa sucursal le pone precio)
+        const { error } = await supabase.from("productos").insert({
+          sucursal: suc, nombre: p.nombre, codigo: p.codigo, interno: p.interno,
+          precio: 0, stock: cant, stock_min: p.stock_min, stock_max: p.stock_max,
+          rapido: false, emoji: p.emoji,
+        });
+        if (error) throw error;
+        creado = true;
+      }
+      // 2) descontar del almacén
+      const { error: e2 } = await supabase.from("almacen").update({ stock: p.stock - cant }).eq("id", p.id);
+      if (e2) throw e2;
+      // 3) registrar el traspaso
+      const { data: tData } = await supabase.from("traspasos").insert({
+        sucursal: suc, producto_id: p.id, nombre: p.nombre, codigo: p.codigo,
+        cantidad: cant, almacen_anterior: p.stock, almacen_nuevo: p.stock - cant,
+        creado_en_pos: creado, usuario: perfil.nombre,
+      }).select().single();
+      setAlmacen((xs) => xs.map((x) => (x.id === p.id ? { ...x, stock: x.stock - cant } : x)));
+      if (tData) setTraspasos((ts) => [tData, ...ts]);
+      // si el destino es la sucursal que estoy viendo, recargar su inventario
+      if (suc === sucursal) cargarDatos(sucursal);
+      setTraspasar(null);
+      setErrorMsg(creado
+        ? `✓ Traspaso hecho. "${p.nombre}" se creó en ${SUCURSALES[suc].corto} con PRECIO 0 — asígnale precio en Inventario.`
+        : `✓ Traspaso hecho a ${SUCURSALES[suc].corto}.`);
+    } catch (err) {
+      setErrorMsg("No se pudo traspasar: " + (err?.message || ""));
+    }
+  };
+  const almStockColor = (p) => (p.stock <= 0 ? "#E11D48" : p.stock <= p.stock_min ? "#D97706" : "#0E9F6E");
 
   /* ============ MONITOREO (admin, ambos moteles) ============ */
   const cargarMonitor = useCallback(async () => {
@@ -717,7 +848,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
   }
 
   const tabs = esAdmin
-    ? [["monitoreo", "🖥️ Monitoreo"], ["ventas", "🛒 Ventas"], ["inventario", "📦 Inventario"], ["reportes", "📊 Estadísticas"], ["cortes", "🗂️ Cortes"], ["usuarios", "👥 Usuarios"]]
+    ? [["monitoreo", "🖥️ Monitoreo"], ["ventas", "🛒 Ventas"], ["inventario", "📦 Inventario"], ["almacen", "🏬 Almacén"], ["reportes", "📊 Estadísticas"], ["cortes", "🗂️ Cortes"], ["usuarios", "👥 Usuarios"]]
     : [["ventas", "🛒 Ventas"], ["miresumen", "🧾 Mi resumen"]];
 
   const marcaActiva = SUCURSALES[sucursal];
@@ -1074,7 +1205,11 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 <tr key={p.id}>
                   <td style={S.td}>{p.emoji} {p.nombre} {p.rapido && <span title="Botón rápido">⚡</span>}</td>
                   <td style={S.td}><span style={S.codePill}>{p.codigo}</span> {p.interno && <span style={S.internoPill}>interno</span>}</td>
-                  <td style={{ ...S.td, textAlign: "right" }}>{money(p.precio)}</td>
+                  <td style={{ ...S.td, textAlign: "right" }}>
+                    {Number(p.precio) === 0
+                      ? <span style={{ background: "#FFF1F2", color: "#E11D48", padding: "2px 8px", borderRadius: 6, fontSize: 12, fontWeight: 700 }}>SIN PRECIO ⚠</span>
+                      : money(p.precio)}
+                  </td>
                   <td style={{ ...S.td, textAlign: "center" }}>
                     <span style={{ ...S.stockPill, background: stockColor(p) }}>{p.stock <= 0 ? "AGOTADO" : p.stock}</span>
                     {p.stock <= p.stock_min && p.stock_max > 0 && (
@@ -1262,6 +1397,170 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== ALMACÉN GENERAL (admin) ==================== */}
+      {view === "almacen" && esAdmin && (
+        <div style={S.page} className="no-print">
+          <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>
+            Almacén central único. Desde aquí se traspasa mercancía al inventario de venta de cada motel.
+          </div>
+          <div style={S.pageHead}>
+            <input value={almFilter} onChange={(e) => setAlmFilter(e.target.value)} placeholder="Filtrar productos del almacén…" style={S.filterInput} />
+            <button style={S.payBtn} onClick={nuevoAlmProducto}>＋ Nuevo producto</button>
+          </div>
+          <table style={S.table}>
+            <thead><tr><th style={S.th}>Producto</th><th style={S.th}>Código</th><th style={S.thC}>En almacén</th><th style={S.thC}>Mín / Máx</th><th style={S.thC}>Acciones</th></tr></thead>
+            <tbody>
+              {almacen.filter((p) => p.nombre.toLowerCase().includes(almFilter.toLowerCase()) || p.codigo.includes(almFilter)).map((p) => (
+                <tr key={p.id}>
+                  <td style={S.td}>{p.emoji} {p.nombre}</td>
+                  <td style={S.td}><span style={S.codePill}>{p.codigo}</span> {p.interno && <span style={S.internoPill}>interno</span>}</td>
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <span style={{ ...S.stockPill, background: almStockColor(p) }}>{p.stock <= 0 ? "AGOTADO" : p.stock}</span>
+                    {p.stock <= p.stock_min && p.stock_max > 0 && (
+                      <div style={{ fontSize: 11, color: "#D97706" }}>⚠ recomprar {Math.max(0, p.stock_max - p.stock)} u</div>
+                    )}
+                  </td>
+                  <td style={{ ...S.td, textAlign: "center", fontFamily: "monospace", fontSize: 13 }}>{p.stock_min} / {p.stock_max || "—"}</td>
+                  <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}>
+                    <button style={{ ...S.miniBtn, borderColor: "#FCA311", color: "#B8860B", fontWeight: 700 }}
+                      onClick={() => setTraspasar({ producto: p, cantidad: "", sucursal: "" })}>
+                      🔀 Traspasar
+                    </button>{" "}
+                    <button style={{ ...S.miniBtn, borderColor: "#0E9F6E", color: "#0E9F6E", fontWeight: 700 }}
+                      onClick={() => setAlmResurtir({ producto: p, cantidad: p.stock_max > p.stock ? String(p.stock_max - p.stock) : "", nota: "" })}>
+                      📥 Entrada
+                    </button>{" "}
+                    <button style={S.miniBtn} onClick={() => setAlmForm({ ...p, stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || "") })}>✏️</button>{" "}
+                    <button style={S.miniBtn} onClick={() => eliminarAlmProducto(p.id)}>🗑️</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {almacen.length === 0 && <div style={S.emptyCart}>El almacén está vacío. Da de alta productos con "Nuevo producto".</div>}
+
+          <div style={S.repGrid2}>
+            <div style={{ ...S.card, marginTop: 16 }}>
+              <div style={S.cardTitle}>🔀 Últimos traspasos</div>
+              {traspasos.length === 0 && <div style={S.emptyCart}>Aún no hay traspasos.</div>}
+              <table style={S.table}>
+                <tbody>
+                  {traspasos.map((t) => (
+                    <tr key={t.id}>
+                      <td style={S.td}>{fechaLarga(t.fecha)}</td>
+                      <td style={S.td}>{t.nombre}</td>
+                      <td style={{ ...S.td, textAlign: "center" }}>{t.cantidad} u →</td>
+                      <td style={{ ...S.td, fontWeight: 700 }}>{SUCURSALES[t.sucursal]?.corto}{t.creado_en_pos && <span style={{ ...S.internoPill, marginLeft: 4 }}>nuevo</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ ...S.card, marginTop: 16 }}>
+              <div style={S.cardTitle}>📥 Últimas entradas al almacén</div>
+              {almacenEntradas.length === 0 && <div style={S.emptyCart}>Aún no hay entradas.</div>}
+              <table style={S.table}>
+                <tbody>
+                  {almacenEntradas.map((e) => (
+                    <tr key={e.id}>
+                      <td style={S.td}>{fechaLarga(e.fecha)}</td>
+                      <td style={S.td}>{e.nombre}</td>
+                      <td style={{ ...S.td, textAlign: "center" }}>+{e.cantidad} u</td>
+                      <td style={{ ...S.td, fontSize: 12, color: "#8A93A3" }}>{e.nota}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- alta producto almacén ---------- */}
+      {almForm && (
+        <div style={S.overlay} className="no-print">
+          <div style={S.modal}>
+            <div style={S.modalTitle}>{almForm.id ? "Editar producto de almacén" : "Nuevo producto de almacén"}</div>
+            <label style={S.label}>Nombre *</label>
+            <input style={S.input} value={almForm.nombre} onChange={(e) => setAlmForm({ ...almForm, nombre: e.target.value })} autoFocus />
+            <label style={S.label}>Código de barras (vacío = genera interno #{almSiguienteInterno})</label>
+            <input style={S.input} value={almForm.codigo} placeholder={`Se generará el ${almSiguienteInterno}`}
+              onChange={(e) => setAlmForm({ ...almForm, codigo: e.target.value, interno: false })} />
+            <div style={S.formRow}>
+              <div style={{ flex: 1 }}><label style={S.label}>En almacén</label>
+                <input type="number" style={S.input} value={almForm.stock} onChange={(e) => setAlmForm({ ...almForm, stock: e.target.value })} /></div>
+              <div style={{ flex: 1 }}><label style={S.label}>Stock mín.</label>
+                <input type="number" style={S.input} value={almForm.stock_min} onChange={(e) => setAlmForm({ ...almForm, stock_min: e.target.value })} /></div>
+              <div style={{ flex: 1 }}><label style={S.label}>Stock máx.</label>
+                <input type="number" style={S.input} value={almForm.stock_max} onChange={(e) => setAlmForm({ ...almForm, stock_max: e.target.value })} /></div>
+            </div>
+            <label style={S.label}>Emoji</label>
+            <input style={S.input} value={almForm.emoji} onChange={(e) => setAlmForm({ ...almForm, emoji: e.target.value })} />
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setAlmForm(null)}>Cancelar</button>
+              <button style={S.payBtn} onClick={guardarAlmProducto}>💾 Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- entrada de mercancía al almacén ---------- */}
+      {almResurtir && (
+        <div style={S.overlay} className="no-print">
+          <div style={S.modal}>
+            <div style={S.modalTitle}>📥 Entrada al almacén: {almResurtir.producto.nombre}</div>
+            <div style={{ fontSize: 14, marginBottom: 6 }}>En almacén ahora: <b>{almResurtir.producto.stock}</b></div>
+            <label style={S.label}>Cantidad que entra *</label>
+            <input type="number" style={S.bigInput} value={almResurtir.cantidad} autoFocus
+              onChange={(e) => setAlmResurtir({ ...almResurtir, cantidad: e.target.value })}
+              onKeyDown={(e) => e.key === "Enter" && registrarAlmEntrada()} />
+            <label style={S.label}>Nota (proveedor, factura…)</label>
+            <input style={S.input} value={almResurtir.nota} onChange={(e) => setAlmResurtir({ ...almResurtir, nota: e.target.value })} />
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setAlmResurtir(null)}>Cancelar</button>
+              <button style={{ ...S.payBtn, opacity: parseInt(almResurtir.cantidad) > 0 ? 1 : 0.4 }}
+                disabled={!(parseInt(almResurtir.cantidad) > 0)} onClick={registrarAlmEntrada}>💾 Registrar entrada</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- traspaso ---------- */}
+      {traspasar && (
+        <div style={S.overlay} className="no-print">
+          <div style={S.modal}>
+            <div style={S.modalTitle}>🔀 Traspasar: {traspasar.producto.nombre}</div>
+            <div style={{ fontSize: 14, marginBottom: 10 }}>Disponible en almacén: <b>{traspasar.producto.stock}</b> u</div>
+            <label style={S.label}>Sucursal destino *</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              {Object.entries(SUCURSALES).map(([k, s]) => (
+                <button key={k} style={{ ...S.methodBtn, flex: 1, ...(traspasar.sucursal === k ? { borderColor: s.color, background: "#F0FDF4", color: s.color } : {}) }}
+                  onClick={() => setTraspasar({ ...traspasar, sucursal: k })}>{s.corto}</button>
+              ))}
+            </div>
+            <label style={S.label}>Cantidad a traspasar *</label>
+            <input type="number" style={S.bigInput} value={traspasar.cantidad} autoFocus
+              onChange={(e) => setTraspasar({ ...traspasar, cantidad: e.target.value })}
+              onKeyDown={(e) => e.key === "Enter" && ejecutarTraspaso()} />
+            {parseInt(traspasar.cantidad) > 0 && (
+              <div style={{ fontSize: 13, marginTop: 6, color: parseInt(traspasar.cantidad) > traspasar.producto.stock ? "#E11D48" : "#455" }}>
+                Quedarán <b>{traspasar.producto.stock - (parseInt(traspasar.cantidad) || 0)}</b> u en el almacén.
+              </div>
+            )}
+            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 8 }}>
+              Si el producto no existe en la sucursal destino, se creará automáticamente con precio 0 para que le asignes precio en su Inventario.
+            </div>
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setTraspasar(null)}>Cancelar</button>
+              <button style={{ ...S.payBtn, opacity: (parseInt(traspasar.cantidad) > 0 && traspasar.sucursal) ? 1 : 0.4 }}
+                disabled={!(parseInt(traspasar.cantidad) > 0 && traspasar.sucursal)} onClick={ejecutarTraspaso}>
+                🔀 Confirmar traspaso
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1472,6 +1771,7 @@ const S = {
   miniBtn: { border: "1px solid #D7DCE5", background: "#fff", borderRadius: 8, padding: "6px 10px", fontSize: 13, cursor: "pointer" },
 
   repGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 },
+  repGrid2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 },
   card: { background: "#fff", borderRadius: 14, padding: 18, boxShadow: "0 1px 4px rgba(20,33,61,.12)" },
   cardTitle: { fontSize: 16, fontWeight: 800, marginBottom: 12 },
   corteRow: { display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #F2F4F8", fontSize: 15 },
