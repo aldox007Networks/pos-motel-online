@@ -234,7 +234,15 @@ export default function App() {
   }, [almacen]);
 
   const nuevoAlmProducto = () =>
-    setAlmForm({ id: null, nombre: "", codigo: "", interno: false, stock: "", stock_min: "", stock_max: "", emoji: "📦" });
+    setAlmForm({ id: null, nombre: "", codigo: "", interno: false, stock: "", stock_min: "", stock_max: "", emoji: "📦", costo: "", precio_venta: "" });
+
+  // cálculo de margen: ganancia en $ y en %
+  const calcMargen = (costo, venta) => {
+    const c = parseFloat(costo) || 0, v = parseFloat(venta) || 0;
+    const ganancia = v - c;
+    const pct = v > 0 ? (ganancia / v) * 100 : 0; // margen sobre venta
+    return { ganancia, pct };
+  };
 
   const guardarAlmProducto = async () => {
     if (!almForm.nombre) return;
@@ -245,6 +253,8 @@ export default function App() {
       stock: parseInt(almForm.stock) || 0,
       stock_min: parseInt(almForm.stock_min) || 0, stock_max: parseInt(almForm.stock_max) || 0,
       emoji: almForm.emoji || "📦",
+      costo: parseFloat(almForm.costo) || 0,
+      precio_venta: parseFloat(almForm.precio_venta) || 0,
     };
     if (almForm.id) {
       const { data, error } = await supabase.from("almacen").update(p).eq("id", almForm.id).select().single();
@@ -295,17 +305,18 @@ export default function App() {
         .select("*").eq("sucursal", suc).eq("codigo", p.codigo).limit(1);
       if (e0) throw e0;
       let creado = false;
+      const precioVenta = Number(p.precio_venta) || 0;
       if (existentes && existentes.length > 0) {
-        // ya existe: sumar stock
+        // ya existe: sumar stock Y actualizar el precio al del almacén
         const destino = existentes[0];
         const { error } = await supabase.from("productos")
-          .update({ stock: destino.stock + cant }).eq("id", destino.id);
+          .update({ stock: destino.stock + cant, precio: precioVenta }).eq("id", destino.id);
         if (error) throw error;
       } else {
-        // no existe: crear con precio 0 (el admin de esa sucursal le pone precio)
+        // no existe: crear con el precio de venta del almacén
         const { error } = await supabase.from("productos").insert({
           sucursal: suc, nombre: p.nombre, codigo: p.codigo, interno: p.interno,
-          precio: 0, stock: cant, stock_min: p.stock_min, stock_max: p.stock_max,
+          precio: precioVenta, stock: cant, stock_min: p.stock_min, stock_max: p.stock_max,
           rapido: false, emoji: p.emoji,
         });
         if (error) throw error;
@@ -326,8 +337,8 @@ export default function App() {
       if (suc === sucursal) cargarDatos(sucursal);
       setTraspasar(null);
       setErrorMsg(creado
-        ? `✓ Traspaso hecho. "${p.nombre}" se creó en ${SUCURSALES[suc].corto} con PRECIO 0 — asígnale precio en Inventario.`
-        : `✓ Traspaso hecho a ${SUCURSALES[suc].corto}.`);
+        ? `✓ Traspaso hecho. "${p.nombre}" se creó en ${SUCURSALES[suc].corto} con precio ${money(precioVenta)}.`
+        : `✓ Traspaso hecho a ${SUCURSALES[suc].corto}. Precio actualizado a ${money(precioVenta)}.`);
     } catch (err) {
       setErrorMsg("No se pudo traspasar: " + (err?.message || ""));
     }
@@ -1412,9 +1423,11 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <button style={S.payBtn} onClick={nuevoAlmProducto}>＋ Nuevo producto</button>
           </div>
           <table style={S.table}>
-            <thead><tr><th style={S.th}>Producto</th><th style={S.th}>Código</th><th style={S.thC}>En almacén</th><th style={S.thC}>Mín / Máx</th><th style={S.thC}>Acciones</th></tr></thead>
+            <thead><tr><th style={S.th}>Producto</th><th style={S.th}>Código</th><th style={S.thC}>En almacén</th><th style={S.thR}>Costo</th><th style={S.thR}>P. Venta</th><th style={S.thR}>Margen</th><th style={S.thC}>Mín / Máx</th><th style={S.thC}>Acciones</th></tr></thead>
             <tbody>
-              {almacen.filter((p) => p.nombre.toLowerCase().includes(almFilter.toLowerCase()) || p.codigo.includes(almFilter)).map((p) => (
+              {almacen.filter((p) => p.nombre.toLowerCase().includes(almFilter.toLowerCase()) || p.codigo.includes(almFilter)).map((p) => {
+                const m = calcMargen(p.costo, p.precio_venta);
+                return (
                 <tr key={p.id}>
                   <td style={S.td}>{p.emoji} {p.nombre}</td>
                   <td style={S.td}><span style={S.codePill}>{p.codigo}</span> {p.interno && <span style={S.internoPill}>interno</span>}</td>
@@ -1423,6 +1436,15 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                     {p.stock <= p.stock_min && p.stock_max > 0 && (
                       <div style={{ fontSize: 11, color: "#D97706" }}>⚠ recomprar {Math.max(0, p.stock_max - p.stock)} u</div>
                     )}
+                  </td>
+                  <td style={{ ...S.td, textAlign: "right" }}>{money(p.costo)}</td>
+                  <td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(p.precio_venta)}</td>
+                  <td style={{ ...S.td, textAlign: "right" }}>
+                    {p.precio_venta > 0 ? (
+                      <div style={{ color: m.ganancia >= 0 ? "#0E9F6E" : "#E11D48", fontWeight: 700, fontSize: 13 }}>
+                        {money(m.ganancia)}<div style={{ fontSize: 11, fontWeight: 400 }}>{m.pct.toFixed(0)}%</div>
+                      </div>
+                    ) : <span style={{ color: "#8A93A3", fontSize: 12 }}>—</span>}
                   </td>
                   <td style={{ ...S.td, textAlign: "center", fontFamily: "monospace", fontSize: 13 }}>{p.stock_min} / {p.stock_max || "—"}</td>
                   <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}>
@@ -1434,11 +1456,11 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       onClick={() => setAlmResurtir({ producto: p, cantidad: p.stock_max > p.stock ? String(p.stock_max - p.stock) : "", nota: "" })}>
                       📥 Entrada
                     </button>{" "}
-                    <button style={S.miniBtn} onClick={() => setAlmForm({ ...p, stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || "") })}>✏️</button>{" "}
+                    <button style={S.miniBtn} onClick={() => setAlmForm({ ...p, stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || ""), costo: String(p.costo || ""), precio_venta: String(p.precio_venta || "") })}>✏️</button>{" "}
                     <button style={S.miniBtn} onClick={() => eliminarAlmProducto(p.id)}>🗑️</button>
                   </td>
                 </tr>
-              ))}
+              );})}
             </tbody>
           </table>
           {almacen.length === 0 && <div style={S.emptyCart}>El almacén está vacío. Da de alta productos con "Nuevo producto".</div>}
@@ -1498,6 +1520,25 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ flex: 1 }}><label style={S.label}>Stock máx.</label>
                 <input type="number" style={S.input} value={almForm.stock_max} onChange={(e) => setAlmForm({ ...almForm, stock_max: e.target.value })} /></div>
             </div>
+            <div style={S.formRow}>
+              <div style={{ flex: 1 }}><label style={S.label}>Costo de compra $</label>
+                <input type="number" style={S.input} value={almForm.costo} onChange={(e) => setAlmForm({ ...almForm, costo: e.target.value })} /></div>
+              <div style={{ flex: 1 }}><label style={S.label}>Precio venta público $</label>
+                <input type="number" style={S.input} value={almForm.precio_venta} onChange={(e) => setAlmForm({ ...almForm, precio_venta: e.target.value })} /></div>
+            </div>
+            {(() => {
+              const m = calcMargen(almForm.costo, almForm.precio_venta);
+              const v = parseFloat(almForm.precio_venta) || 0;
+              if (v <= 0) return null;
+              return (
+                <div style={{ background: m.ganancia >= 0 ? "#F0FDF4" : "#FFF1F2", borderRadius: 10, padding: "12px 14px", marginTop: 4, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: "#455" }}>Margen de ganancia</span>
+                  <span style={{ fontSize: 18, fontWeight: 800, color: m.ganancia >= 0 ? "#0E9F6E" : "#E11D48" }}>
+                    {money(m.ganancia)} <span style={{ fontSize: 14 }}>({m.pct.toFixed(0)}%)</span>
+                  </span>
+                </div>
+              );
+            })()}
             <label style={S.label}>Emoji</label>
             <input style={S.input} value={almForm.emoji} onChange={(e) => setAlmForm({ ...almForm, emoji: e.target.value })} />
             <div style={S.modalActions}>
@@ -1534,7 +1575,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
         <div style={S.overlay} className="no-print">
           <div style={S.modal}>
             <div style={S.modalTitle}>🔀 Traspasar: {traspasar.producto.nombre}</div>
-            <div style={{ fontSize: 14, marginBottom: 10 }}>Disponible en almacén: <b>{traspasar.producto.stock}</b> u</div>
+            <div style={{ fontSize: 14, marginBottom: 10 }}>
+              Disponible en almacén: <b>{traspasar.producto.stock}</b> u ·
+              Precio de venta: <b>{money(traspasar.producto.precio_venta)}</b>
+            </div>
             <label style={S.label}>Sucursal destino *</label>
             <div style={{ display: "flex", gap: 8 }}>
               {Object.entries(SUCURSALES).map(([k, s]) => (
@@ -1552,7 +1596,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </div>
             )}
             <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 8 }}>
-              Si el producto no existe en la sucursal destino, se creará automáticamente con precio 0 para que le asignes precio en su Inventario.
+              El producto entrará al POS de la sucursal con el precio de venta del almacén. Si ya existía, se actualiza su precio automáticamente.
             </div>
             <div style={S.modalActions}>
               <button style={S.ghostBtn} onClick={() => setTraspasar(null)}>Cancelar</button>
