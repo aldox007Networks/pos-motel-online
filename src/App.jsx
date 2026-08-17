@@ -870,33 +870,40 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       <style>{CSS}</style>
 
       <header style={{ ...S.header, borderBottom: `4px solid ${marcaActiva.color}` }} className="no-print">
-        <div style={S.logo}><span style={{ ...S.logoMark }}>▮▯▮</span>{marcaActiva.nombre}</div>
-        {esAdmin && (
-          <div style={S.sucSelector}>
-            {Object.entries(SUCURSALES).map(([k, s]) => (
-              <button key={k} onClick={(e) => { e.stopPropagation(); setSucursal(k); }}
-                style={{ ...S.sucBtn, ...(sucursal === k ? { background: s.color, color: "#fff", borderColor: s.color } : {}) }}>
-                {s.corto}
-              </button>
-            ))}
+        {/* Fila superior: marca, sucursal, usuario */}
+        <div style={S.headerTop}>
+          <div style={S.logo}><span style={{ ...S.logoMark }}>▮▯▮</span>{marcaActiva.nombre}</div>
+          {esAdmin && (
+            <div style={S.sucSelector}>
+              {Object.entries(SUCURSALES).map(([k, s]) => (
+                <button key={k} onClick={(e) => { e.stopPropagation(); setSucursal(k); }}
+                  style={{ ...S.sucBtn, ...(sucursal === k ? { background: s.color, color: "#fff", borderColor: s.color } : {}) }}>
+                  {s.corto}
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{ flex: 1 }} />
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>{perfil.nombre} <span style={S.rolPill}>{perfil.rol}</span></div>
+            <div style={{ fontSize: 12, color: "#B8C0D0" }}>
+              T{turnoActual()} · en línea · {agenteOk ? "🖨️ directa" : "🖨️ navegador"} ·{" "}
+              <button onClick={(e) => { e.stopPropagation(); salir(); }} style={S.linkBtn}>Cerrar sesión</button>
+            </div>
           </div>
-        )}
-        <nav style={S.nav}>
-          {tabs.map(([k, label]) => (
-            <button key={k} onClick={(e) => { e.stopPropagation(); setView(k); }}
-              style={{ ...S.navBtn, ...(view === k ? S.navBtnOn : {}) }}>{label}</button>
-          ))}
+        </div>
+        {/* Fila inferior: navegación + corte de turno */}
+        <div style={S.headerNav}>
+          <nav style={S.nav}>
+            {tabs.map(([k, label]) => (
+              <button key={k} onClick={(e) => { e.stopPropagation(); setView(k); }}
+                style={{ ...S.navBtn, ...(view === k ? S.navBtnOn : {}) }}>{label}</button>
+            ))}
+          </nav>
           <button onClick={(e) => { e.stopPropagation(); cerrarTurno(); }}
             style={S.corteNavBtn} title="Generar el corte de todas las ventas del turno">
             🗂️ Corte de turno
           </button>
-        </nav>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 13, fontWeight: 700 }}>{perfil.nombre} <span style={S.rolPill}>{perfil.rol}</span></div>
-          <div style={{ fontSize: 11, color: "#B8C0D0" }}>
-            T{turnoActual()} · en línea · {agenteOk ? "🖨️ directa" : "🖨️ navegador"} ·{" "}
-            <button onClick={(e) => { e.stopPropagation(); salir(); }} style={S.linkBtn}>Cerrar sesión</button>
-          </div>
         </div>
       </header>
 
@@ -1727,13 +1734,15 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
 /* ============================ estilos ============================ */
 const S = {
   app: { fontFamily: "'Segoe UI', system-ui, sans-serif", background: "#EEF1F5", minHeight: "100vh", color: "#1B2430" },
-  header: { display: "flex", alignItems: "center", gap: 14, padding: "10px 18px", background: "#14213D", color: "#fff", flexWrap: "wrap" },
-  logo: { fontWeight: 800, letterSpacing: 1.5, fontSize: 14, display: "flex", alignItems: "center", gap: 8 },
+  header: { background: "#14213D", color: "#fff", padding: "10px 18px" },
+  headerTop: { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" },
+  headerNav: { display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap", borderTop: "1px solid #2A3550", paddingTop: 10 },
+  logo: { fontWeight: 800, letterSpacing: 1.5, fontSize: 16, display: "flex", alignItems: "center", gap: 8 },
   logoMark: { color: "#FCA311", fontSize: 18, letterSpacing: -1 },
   sucSelector: { display: "flex", gap: 6 },
-  sucBtn: { background: "transparent", color: "#B8C0D0", border: "1px solid #3A4763", padding: "6px 12px", borderRadius: 20, fontSize: 13, fontWeight: 700, cursor: "pointer" },
+  sucBtn: { background: "transparent", color: "#B8C0D0", border: "1px solid #3A4763", padding: "7px 16px", borderRadius: 20, fontSize: 15, fontWeight: 700, cursor: "pointer" },
   nav: { display: "flex", gap: 4, flex: 1, flexWrap: "wrap" },
-  navBtn: { background: "transparent", color: "#B8C0D0", border: "none", padding: "8px 12px", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer" },
+  navBtn: { background: "transparent", color: "#B8C0D0", border: "none", padding: "10px 16px", borderRadius: 8, fontSize: 16, fontWeight: 600, cursor: "pointer" },
   navBtnOn: { background: "#FCA311", color: "#14213D" },
   rolPill: { fontSize: 10, background: "#FCA311", color: "#14213D", padding: "1px 7px", borderRadius: 10, fontWeight: 800, textTransform: "uppercase", marginLeft: 4 },
   rolPillDark: { fontSize: 11, background: "#14213D", color: "#fff", padding: "3px 10px", borderRadius: 12, fontWeight: 700, textTransform: "uppercase" },
@@ -1759,11 +1768,11 @@ const S = {
 
   cartBox: { background: "#fff", borderRadius: 14, minHeight: 200, boxShadow: "0 1px 4px rgba(20,33,61,.12)", overflow: "auto" },
   emptyCart: { padding: 30, textAlign: "center", color: "#8A93A3", fontSize: 14 },
-  table: { width: "100%", borderCollapse: "collapse", fontSize: 14 },
-  th: { textAlign: "left", padding: "10px 12px", fontSize: 12, textTransform: "uppercase", letterSpacing: 1, color: "#8A93A3", borderBottom: "2px solid #EEF1F5" },
-  thR: { textAlign: "right", padding: "10px 12px", fontSize: 12, textTransform: "uppercase", letterSpacing: 1, color: "#8A93A3", borderBottom: "2px solid #EEF1F5" },
-  thC: { textAlign: "center", padding: "10px 12px", fontSize: 12, textTransform: "uppercase", letterSpacing: 1, color: "#8A93A3", borderBottom: "2px solid #EEF1F5" },
-  td: { padding: "10px 12px", borderBottom: "1px solid #F2F4F8" },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: 16 },
+  th: { textAlign: "left", padding: "12px 12px", fontSize: 13, textTransform: "uppercase", letterSpacing: 1, color: "#8A93A3", borderBottom: "2px solid #EEF1F5" },
+  thR: { textAlign: "right", padding: "12px 12px", fontSize: 13, textTransform: "uppercase", letterSpacing: 1, color: "#8A93A3", borderBottom: "2px solid #EEF1F5" },
+  thC: { textAlign: "center", padding: "12px 12px", fontSize: 13, textTransform: "uppercase", letterSpacing: 1, color: "#8A93A3", borderBottom: "2px solid #EEF1F5" },
+  td: { padding: "12px 12px", borderBottom: "1px solid #F2F4F8" },
   tdCode: { fontSize: 11, color: "#8A93A3", fontFamily: "monospace" },
   qtyBtn: { width: 28, height: 28, borderRadius: 8, border: "1px solid #D7DCE5", background: "#fff", fontSize: 16, cursor: "pointer" },
   qty: { display: "inline-block", minWidth: 30, textAlign: "center", fontWeight: 700 },
@@ -1774,7 +1783,7 @@ const S = {
   totalAmt: { fontSize: 34, fontWeight: 800, fontFamily: "ui-monospace, monospace" },
   payBtn: { background: "#0E9F6E", color: "#fff", border: "none", borderRadius: 10, padding: "14px 26px", fontSize: 17, fontWeight: 800, cursor: "pointer" },
   corteBtn: { background: "transparent", color: "#FCA311", border: "2px solid #FCA311", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 800, cursor: "pointer" },
-  corteNavBtn: { background: "transparent", color: "#FCA311", border: "1px solid #FCA311", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", marginLeft: 8 },
+  corteNavBtn: { background: "#FCA311", color: "#14213D", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 15, fontWeight: 800, cursor: "pointer", marginLeft: "auto" },
   ghostBtn: { background: "#fff", color: "#455", border: "1px solid #D7DCE5", borderRadius: 10, padding: "12px 20px", fontSize: 15, cursor: "pointer" },
   deleteBtn: { background: "#FFF1F2", color: "#E11D48", border: "1px solid #FECDD3", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
 
@@ -1812,12 +1821,12 @@ const S = {
   codePill: { fontFamily: "monospace", background: "#EEF1F5", padding: "2px 8px", borderRadius: 6, fontSize: 13 },
   internoPill: { fontSize: 10, background: "#FCA311", color: "#14213D", padding: "2px 6px", borderRadius: 6, fontWeight: 800, textTransform: "uppercase" },
   stockPill: { color: "#fff", padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: 800 },
-  miniBtn: { border: "1px solid #D7DCE5", background: "#fff", borderRadius: 8, padding: "6px 10px", fontSize: 13, cursor: "pointer" },
+  miniBtn: { border: "1px solid #D7DCE5", background: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 14, cursor: "pointer" },
 
   repGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 },
   repGrid2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 },
   card: { background: "#fff", borderRadius: 14, padding: 18, boxShadow: "0 1px 4px rgba(20,33,61,.12)" },
-  cardTitle: { fontSize: 16, fontWeight: 800, marginBottom: 12 },
+  cardTitle: { fontSize: 18, fontWeight: 800, marginBottom: 12 },
   corteRow: { display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #F2F4F8", fontSize: 15 },
   barTrack: { height: 8, background: "#EEF1F5", borderRadius: 6, marginTop: 4 },
   barFill: { height: 8, background: "linear-gradient(90deg,#0E9F6E,#FCA311)", borderRadius: 6 },
