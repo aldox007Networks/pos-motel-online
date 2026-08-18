@@ -102,6 +102,7 @@ export default function App() {
   const [cargando, setCargando] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [view, setView] = useState("ventas");
+  const [hayActualizacion, setHayActualizacion] = useState(false);
 
   /* ---------- venta ---------- */
   const [cart, setCart] = useState([]);
@@ -126,6 +127,35 @@ export default function App() {
 
   const scanRef = useRef(null);
   const esAdmin = perfil?.rol === "admin";
+
+  /* ============ DETECTOR DE ACTUALIZACIÓN ============ */
+  // Lee el index.html del servidor (sin caché) y compara el bundle cargado.
+  // Si cambió, significa que hay una versión nueva desplegada.
+  useEffect(() => {
+    // identifica el bundle que esta pestaña está usando ahora mismo
+    const bundleActual = () => {
+      const scripts = Array.from(document.querySelectorAll("script[src]"));
+      const s = scripts.find((x) => /\/assets\/index-.*\.js/.test(x.src));
+      return s ? s.src.split("/assets/")[1] : null;
+    };
+    const miVersion = bundleActual();
+    if (!miVersion) return; // en desarrollo no aplica
+
+    const revisar = async () => {
+      try {
+        const r = await fetch("/index.html?t=" + Date.now(), { cache: "no-store" });
+        if (!r.ok) return;
+        const html = await r.text();
+        const m = html.match(/\/assets\/(index-[^"']+\.js)/);
+        const versionServidor = m ? m[1] : null;
+        if (versionServidor && versionServidor !== miVersion) {
+          setHayActualizacion(true);
+        }
+      } catch { /* sin conexión: ignorar */ }
+    };
+    const t = setInterval(revisar, 180000); // cada 3 minutos
+    return () => clearInterval(t);
+  }, []);
 
   /* ============ AUTENTICACIÓN ============ */
   useEffect(() => {
@@ -938,6 +968,15 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
   return (
     <div style={S.app} onClick={refocus}>
       <style>{CSS}</style>
+
+      {hayActualizacion && (
+        <div style={S.updateBar} className="no-print">
+          <span>✨ Hay una nueva versión de iPOS disponible.</span>
+          <button style={S.updateBtn} onClick={() => window.location.reload(true)}>
+            Actualizar ahora
+          </button>
+        </div>
+      )}
 
       <header style={{ ...S.header, borderBottom: `4px solid ${marcaActiva.color}` }} className="no-print">
         {/* Fila superior: marca, sucursal, usuario */}
@@ -1913,6 +1952,8 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
 /* ============================ estilos ============================ */
 const S = {
   app: { fontFamily: "'Segoe UI', system-ui, sans-serif", background: "#EEF1F5", minHeight: "100vh", color: "#1B2430" },
+  updateBar: { background: "#0E9F6E", color: "#fff", padding: "10px 18px", display: "flex", alignItems: "center", justifyContent: "center", gap: 16, fontSize: 15, fontWeight: 600, flexWrap: "wrap" },
+  updateBtn: { background: "#fff", color: "#0E9F6E", border: "none", borderRadius: 8, padding: "8px 18px", fontSize: 14, fontWeight: 800, cursor: "pointer" },
   header: { background: "#14213D", color: "#fff", padding: "10px 18px" },
   headerTop: { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" },
   headerNav: { display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap", borderTop: "1px solid #2A3550", paddingTop: 10 },
