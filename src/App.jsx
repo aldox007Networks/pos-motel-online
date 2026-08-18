@@ -1616,6 +1616,9 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           </div>
         </div>
       )}
+
+      {/* ---------- alta producto almacén ---------- */}
+      {almForm && (
         <div style={S.overlay} className="no-print">
           <div style={S.modal}>
             <div style={S.modalTitle}>{almForm.id ? "Editar producto de almacén" : "Nuevo producto de almacén"}</div>
