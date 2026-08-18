@@ -93,10 +93,6 @@ export default function App() {
   const [almForm, setAlmForm] = useState(null); // alta/edición de producto de almacén
   const [almResurtir, setAlmResurtir] = useState(null); // entrada de mercancía al almacén
   const [traspasar, setTraspasar] = useState(null); // {producto, cantidad, sucursal}
-  const [eliminarPOS, setEliminarPOS] = useState(null); // {producto, causa} - eliminar del inventario POS
-  const [darBaja, setDarBaja] = useState(null); // {producto, cantidad, motivo, nota} - baja del almacén
-  const [bajas, setBajas] = useState([]);
-  const [procesando, setProcesando] = useState(false);
   const [almFilter, setAlmFilter] = useState("");
   const [perfiles, setPerfiles] = useState([]);
   const [cargando, setCargando] = useState(false);
@@ -219,15 +215,13 @@ export default function App() {
   const cargarAlmacen = useCallback(async () => {
     setErrorMsg("");
     try {
-      const [a, e, t, b] = await Promise.all([
+      const [a, e, t] = await Promise.all([
         supabase.from("almacen").select("*").order("nombre"),
         supabase.from("almacen_entradas").select("*").order("fecha", { ascending: false }).limit(30),
         supabase.from("traspasos").select("*").order("fecha", { ascending: false }).limit(30),
-        supabase.from("bajas").select("*").order("fecha", { ascending: false }).limit(50),
       ]);
       if (a.error || e.error || t.error) throw a.error || e.error || t.error;
       setAlmacen(a.data); setAlmacenEntradas(e.data); setTraspasos(t.data);
-      if (!b.error) setBajas(b.data);
     } catch (err) {
       setErrorMsg("No se pudo cargar el almacén: " + (err?.message || ""));
     }
@@ -274,36 +268,10 @@ export default function App() {
     setAlmForm(null);
   };
 
-  // Dar de baja del almacén: registra la merma en el reporte permanente
-  const ejecutarBaja = async () => {
-    if (procesando) return;
-    const p = darBaja.producto;
-    const cant = parseInt(darBaja.cantidad) || 0;
-    const motivo = darBaja.motivo;
-    if (!motivo) { setErrorMsg("Elige el motivo de la baja."); return; }
-    if (cant <= 0) { setErrorMsg("Indica la cantidad a dar de baja."); return; }
-    if (cant > p.stock) { setErrorMsg("No puedes dar de baja más de lo que hay (disponible: " + p.stock + ")."); return; }
-    setProcesando(true); setErrorMsg("");
-    try {
-      const costoUnit = Number(p.costo) || 0;
-      // 1) registrar la baja (auditoría permanente)
-      const { data: bajaData, error: e1 } = await supabase.from("bajas").insert({
-        producto_id: p.id, nombre: p.nombre, codigo: p.codigo, cantidad: cant,
-        motivo, costo_unitario: costoUnit, costo_perdido: costoUnit * cant,
-        nota: (darBaja.nota || "").trim(), usuario: perfil.nombre,
-      }).select().single();
-      if (e1) throw e1;
-      // 2) descontar del almacén
-      const { error: e2 } = await supabase.from("almacen").update({ stock: p.stock - cant }).eq("id", p.id);
-      if (e2) throw e2;
-      setAlmacen((xs) => xs.map((x) => (x.id === p.id ? { ...x, stock: x.stock - cant } : x)));
-      if (bajaData) setBajas((bs) => [bajaData, ...bs]);
-      setDarBaja(null);
-      setErrorMsg(`✓ Baja registrada: ${cant} u de "${p.nombre}" (${motivo}).`);
-    } catch (err) {
-      setErrorMsg("No se pudo dar de baja: " + (err?.message || ""));
-    }
-    setProcesando(false);
+  const eliminarAlmProducto = async (id) => {
+    const { error } = await supabase.from("almacen").delete().eq("id", id);
+    if (error) { setErrorMsg("No se pudo eliminar: " + error.message); return; }
+    setAlmacen((xs) => xs.filter((x) => x.id !== id));
   };
 
   const registrarAlmEntrada = async () => {
@@ -593,48 +561,10 @@ export default function App() {
     if (interno) setLabelFor(guardado);
   };
 
-  // Eliminar producto del POS: regresa TODO el stock al almacén y registra el retorno
-  const ejecutarEliminarPOS = async () => {
-    if (procesando) return;
-    const p = eliminarPOS.producto;
-    const causa = (eliminarPOS.causa || "").trim();
-    if (!causa) { setErrorMsg("Escribe la causa de la eliminación."); return; }
-    setProcesando(true); setErrorMsg("");
-    try {
-      // 1) si tiene stock, regresarlo al almacén (emparejando por código)
-      if (p.stock > 0) {
-        const { data: enAlm } = await supabase.from("almacen").select("*").eq("codigo", p.codigo).limit(1);
-        if (enAlm && enAlm.length > 0) {
-          const a = enAlm[0];
-          const { error: e1 } = await supabase.from("almacen").update({ stock: a.stock + p.stock }).eq("id", a.id);
-          if (e1) throw e1;
-        } else {
-          // no existe en almacén: crearlo con ese stock para no perder unidades
-          const { error: e1 } = await supabase.from("almacen").insert({
-            nombre: p.nombre, codigo: p.codigo, interno: p.interno, stock: p.stock,
-            stock_min: p.stock_min || 0, stock_max: p.stock_max || 0, emoji: p.emoji,
-            costo: 0, precio_venta: p.precio || 0,
-          });
-          if (e1) throw e1;
-        }
-        // registrar el retorno
-        await supabase.from("retornos").insert({
-          sucursal, nombre: p.nombre, codigo: p.codigo, cantidad: p.stock,
-          causa, usuario: perfil.nombre,
-        });
-      }
-      // 2) borrar el producto del POS
-      const { error: e2 } = await supabase.from("productos").delete().eq("id", p.id);
-      if (e2) throw e2;
-      setProducts((ps) => ps.filter((x) => x.id !== p.id));
-      setEliminarPOS(null);
-      setErrorMsg(p.stock > 0
-        ? `✓ Producto eliminado. Se regresaron ${p.stock} u al almacén general.`
-        : "✓ Producto eliminado.");
-    } catch (err) {
-      setErrorMsg("No se pudo eliminar: " + (err?.message || ""));
-    }
-    setProcesando(false);
+  const eliminarProducto = async (id) => {
+    const { error } = await supabase.from("productos").delete().eq("id", id);
+    if (error) { setErrorMsg("No se pudo eliminar: " + error.message); return; }
+    setProducts((ps) => ps.filter((x) => x.id !== id));
   };
 
   const registrarEntrada = async () => {
@@ -1312,7 +1242,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                     </button>{" "}
                     <button style={S.miniBtn} onClick={() => setLabelFor(p)}>🏷️</button>{" "}
                     <button style={S.miniBtn} onClick={() => setForm({ ...p, precio: String(p.precio), stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || "") })}>✏️</button>{" "}
-                    <button style={S.miniBtn} onClick={() => setEliminarPOS({ producto: p, causa: "" })}>🗑️</button>
+                    <button style={S.miniBtn} onClick={() => eliminarProducto(p.id)}>🗑️</button>
                   </td>
                 </tr>
               ))}
@@ -1534,10 +1464,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       📥 Entrada
                     </button>{" "}
                     <button style={S.miniBtn} onClick={() => setAlmForm({ ...p, stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || ""), costo: String(p.costo || ""), precio_venta: String(p.precio_venta || "") })}>✏️</button>{" "}
-                    <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }}
-                      onClick={() => setDarBaja({ producto: p, cantidad: "", motivo: "", nota: "" })}>
-                      ⬇️ Baja
-                    </button>
+                    <button style={S.miniBtn} onClick={() => eliminarAlmProducto(p.id)}>🗑️</button>
                   </td>
                 </tr>
               );})}
@@ -1579,43 +1506,11 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </table>
             </div>
           </div>
-
-          {/* Reporte de bajas — registro permanente de auditoría */}
-          <div style={{ ...S.card, marginTop: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-              <div style={S.cardTitle}>⬇️ Reporte de bajas (mermas)</div>
-              <span style={{ fontSize: 12, color: "#8A93A3" }}>🔒 Registro permanente — no se puede borrar</span>
-            </div>
-            {bajas.length === 0 && <div style={S.emptyCart}>Aún no se registran bajas.</div>}
-            {bajas.length > 0 && (
-              <table style={S.table}>
-                <thead><tr><th style={S.th}>Fecha</th><th style={S.th}>Producto</th><th style={S.thC}>Cant.</th><th style={S.th}>Motivo</th><th style={S.thR}>Costo perdido</th><th style={S.th}>Registró</th><th style={S.th}>Nota</th></tr></thead>
-                <tbody>
-                  {bajas.map((b) => {
-                    const motLabel = { defecto: "🔧 Defecto", caducidad: "📅 Caducidad", sin_ventas: "📉 Sin ventas", "daño": "💥 Daño" }[b.motivo] || b.motivo;
-                    return (
-                      <tr key={b.id}>
-                        <td style={S.td}>{fechaLarga(b.fecha)}</td>
-                        <td style={S.td}>{b.nombre}</td>
-                        <td style={{ ...S.td, textAlign: "center", fontWeight: 700, color: "#E11D48" }}>−{b.cantidad}</td>
-                        <td style={S.td}>{motLabel}</td>
-                        <td style={{ ...S.td, textAlign: "right", color: "#E11D48" }}>{money(b.costo_perdido)}</td>
-                        <td style={S.td}>{b.usuario}</td>
-                        <td style={{ ...S.td, fontSize: 13, color: "#8A93A3" }}>{b.nota}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-            {bajas.length > 0 && (
-              <div style={{ marginTop: 10, fontSize: 14, fontWeight: 700, textAlign: "right", color: "#E11D48" }}>
-                Total perdido en bajas: {money(bajas.reduce((s, b) => s + Number(b.costo_perdido || 0), 0))}
-              </div>
-            )}
-          </div>
         </div>
       )}
+
+      {/* ---------- alta producto almacén ---------- */}
+      {almForm && (
         <div style={S.overlay} className="no-print">
           <div style={S.modal}>
             <div style={S.modalTitle}>{almForm.id ? "Editar producto de almacén" : "Nuevo producto de almacén"}</div>
@@ -1715,77 +1610,6 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <button style={{ ...S.payBtn, opacity: (parseInt(traspasar.cantidad) > 0 && traspasar.sucursal) ? 1 : 0.4 }}
                 disabled={!(parseInt(traspasar.cantidad) > 0 && traspasar.sucursal)} onClick={ejecutarTraspaso}>
                 🔀 Confirmar traspaso
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ---------- eliminar producto del POS (con causa y retorno al almacén) ---------- */}
-      {eliminarPOS && (
-        <div style={S.overlay} className="no-print">
-          <div style={S.modal}>
-            <div style={S.modalTitle}>🗑️ Eliminar del inventario</div>
-            <div style={{ fontSize: 15, marginBottom: 10 }}>
-              Vas a eliminar <b>{eliminarPOS.producto.nombre}</b> del inventario de {marcaActiva.corto}.
-            </div>
-            {eliminarPOS.producto.stock > 0 && (
-              <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 10, padding: "12px 14px", fontSize: 14, marginBottom: 10 }}>
-                ⚠ Este producto tiene <b>{eliminarPOS.producto.stock} unidades</b>. Al eliminarlo, esas unidades <b>regresarán automáticamente al almacén general</b> (no se pierden).
-              </div>
-            )}
-            <label style={S.label}>Causa de la eliminación *</label>
-            <input style={S.input} value={eliminarPOS.causa} autoFocus
-              placeholder="Ej. producto descontinuado, error de captura…"
-              onChange={(e) => setEliminarPOS({ ...eliminarPOS, causa: e.target.value })} />
-            <div style={S.modalActions}>
-              <button style={S.ghostBtn} onClick={() => setEliminarPOS(null)}>Cancelar</button>
-              <button style={{ ...S.deleteBtn, opacity: (eliminarPOS.causa || "").trim() && !procesando ? 1 : 0.4 }}
-                disabled={!(eliminarPOS.causa || "").trim() || procesando}
-                onClick={ejecutarEliminarPOS}>
-                {procesando ? "Procesando…" : (eliminarPOS.producto.stock > 0 ? "Regresar stock y eliminar" : "Eliminar producto")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ---------- dar de baja del almacén (merma con motivo) ---------- */}
-      {darBaja && (
-        <div style={S.overlay} className="no-print">
-          <div style={S.modal}>
-            <div style={S.modalTitle}>⬇️ Dar de baja: {darBaja.producto.nombre}</div>
-            <div style={{ fontSize: 14, marginBottom: 10 }}>
-              Disponible en almacén: <b>{darBaja.producto.stock}</b> u · Costo unitario: <b>{money(darBaja.producto.costo)}</b>
-            </div>
-            <label style={S.label}>Motivo de la baja *</label>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              {[["defecto", "🔧 Defecto"], ["caducidad", "📅 Caducidad"], ["sin_ventas", "📉 Sin ventas"], ["daño", "💥 Daño"]].map(([k, label]) => (
-                <button key={k} style={{ ...S.methodBtn, ...(darBaja.motivo === k ? { borderColor: "#E11D48", background: "#FFF1F2", color: "#E11D48" } : {}) }}
-                  onClick={() => setDarBaja({ ...darBaja, motivo: k })}>{label}</button>
-              ))}
-            </div>
-            <label style={S.label}>Cantidad a dar de baja *</label>
-            <input type="number" style={S.bigInput} value={darBaja.cantidad} autoFocus
-              onChange={(e) => setDarBaja({ ...darBaja, cantidad: e.target.value })} />
-            {parseInt(darBaja.cantidad) > 0 && (
-              <div style={{ fontSize: 14, marginTop: 6, color: "#E11D48" }}>
-                Costo perdido: <b>{money((Number(darBaja.producto.costo) || 0) * (parseInt(darBaja.cantidad) || 0))}</b>
-              </div>
-            )}
-            <label style={S.label}>Nota (opcional)</label>
-            <input style={S.input} value={darBaja.nota}
-              placeholder="Detalle adicional…"
-              onChange={(e) => setDarBaja({ ...darBaja, nota: e.target.value })} />
-            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 8 }}>
-              La baja queda registrada permanentemente en el reporte de bajas (no se puede borrar).
-            </div>
-            <div style={S.modalActions}>
-              <button style={S.ghostBtn} onClick={() => setDarBaja(null)}>Cancelar</button>
-              <button style={{ ...S.deleteBtn, opacity: (darBaja.motivo && parseInt(darBaja.cantidad) > 0 && !procesando) ? 1 : 0.4 }}
-                disabled={!(darBaja.motivo && parseInt(darBaja.cantidad) > 0) || procesando}
-                onClick={ejecutarBaja}>
-                {procesando ? "Procesando…" : "⬇️ Confirmar baja"}
               </button>
             </div>
           </div>
