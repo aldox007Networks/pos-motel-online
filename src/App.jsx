@@ -98,6 +98,8 @@ export default function App() {
   const [darBaja, setDarBaja] = useState(null); // {producto, cantidad, motivo, nota} - baja del almacén
   const [bajas, setBajas] = useState([]);
   const [procesando, setProcesando] = useState(false);
+  const [cancelarModal, setCancelarModal] = useState(null); // {ticket, motivo, nota}
+  const [cancelaciones, setCancelaciones] = useState([]);
   const [almFilter, setAlmFilter] = useState("");
   const [perfiles, setPerfiles] = useState([]);
   const [cargando, setCargando] = useState(false);
@@ -225,14 +227,16 @@ export default function App() {
   const cargarDatos = useCallback(async (suc) => {
     setCargando(true); setErrorMsg("");
     try {
-      const [p, t, c, e] = await Promise.all([
+      const [p, t, c, e, cn] = await Promise.all([
         supabase.from("productos").select("*").eq("sucursal", suc).order("nombre"),
         supabase.from("tickets").select("*").eq("sucursal", suc).order("fecha", { ascending: false }).limit(300),
         supabase.from("cortes").select("*").eq("sucursal", suc).order("fecha", { ascending: false }).limit(100),
         supabase.from("entradas").select("*").eq("sucursal", suc).order("fecha", { ascending: false }).limit(50),
+        supabase.from("cancelaciones").select("*").eq("sucursal", suc).order("fecha", { ascending: false }).limit(100),
       ]);
       if (p.error || t.error || c.error || e.error) throw p.error || t.error || c.error || e.error;
       setProducts(p.data); setTickets(t.data); setCortes(c.data); setEntradas(e.data);
+      if (!cn.error) setCancelaciones(cn.data);
     } catch (err) {
       setErrorMsg("No se pudieron cargar los datos. Revisa tu conexión a internet. (" + (err?.message || "") + ")");
     }
@@ -509,19 +513,46 @@ export default function App() {
     setGuardandoVenta(false);
   };
 
-  const cancelarTicket = async (t) => {
+  // Abre el modal de cancelación (pide motivo)
+  const cancelarTicket = (t) => {
     if (t.cancelado) return;
-    const { error } = await supabase.from("tickets").update({ cancelado: true }).eq("id", t.id);
-    if (error) { setErrorMsg("No se pudo cancelar: " + error.message); return; }
-    for (const it of t.items) {
-      const p = products.find((x) => x.id === it.id);
-      if (p) await supabase.from("productos").update({ stock: p.stock + it.cant }).eq("id", it.id);
+    setCancelarModal({ ticket: t, motivo: "", nota: "" });
+  };
+
+  // Ejecuta la cancelación con motivo y registro de auditoría
+  const ejecutarCancelacion = async () => {
+    if (procesando) return;
+    const t = cancelarModal.ticket;
+    const motivo = cancelarModal.motivo;
+    if (!motivo) { setErrorMsg("Elige el motivo de la cancelación."); return; }
+    setProcesando(true); setErrorMsg("");
+    try {
+      // 1) marcar el ticket como cancelado
+      const { error } = await supabase.from("tickets").update({ cancelado: true }).eq("id", t.id);
+      if (error) throw error;
+      // 2) devolver el stock al inventario
+      for (const it of t.items) {
+        const p = products.find((x) => x.id === it.id);
+        if (p) await supabase.from("productos").update({ stock: p.stock + it.cant }).eq("id", it.id);
+      }
+      // 3) registrar la cancelación (auditoría permanente)
+      const { data: cData } = await supabase.from("cancelaciones").insert({
+        ticket_id: t.id, folio: t.folio, sucursal: t.sucursal, turno: t.turno,
+        total: t.total, motivo, nota: (cancelarModal.nota || "").trim(),
+        cajera_venta: t.cajera, usuario: perfil.nombre,
+      }).select().single();
+      setTickets((ts) => ts.map((x) => (x.id === t.id ? { ...x, cancelado: true } : x)));
+      setProducts((ps) => ps.map((p) => {
+        const it = t.items.find((x) => x.id === p.id);
+        return it ? { ...p, stock: p.stock + it.cant } : p;
+      }));
+      if (cData) setCancelaciones((cs) => [cData, ...cs]);
+      setCancelarModal(null);
+      setErrorMsg(`✓ Ticket #${String(t.folio).padStart(4, "0")} cancelado. Stock devuelto al inventario.`);
+    } catch (err) {
+      setErrorMsg("No se pudo cancelar: " + (err?.message || ""));
     }
-    setTickets((ts) => ts.map((x) => (x.id === t.id ? { ...x, cancelado: true } : x)));
-    setProducts((ps) => ps.map((p) => {
-      const it = t.items.find((x) => x.id === p.id);
-      return it ? { ...p, stock: p.stock + it.cant } : p;
-    }));
+    setProcesando(false);
   };
 
   /* ============ CORTE DE TURNO ============ */
@@ -1796,6 +1827,41 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
         </div>
       )}
 
+      {/* ---------- cancelar ticket (con motivo) ---------- */}
+      {cancelarModal && (
+        <div style={S.overlay} className="no-print">
+          <div style={S.modal}>
+            <div style={S.modalTitle}>🚫 Cancelar ticket #{String(cancelarModal.ticket.folio).padStart(4, "0")}</div>
+            <div style={{ fontSize: 14, marginBottom: 10 }}>
+              Total: <b>{money(cancelarModal.ticket.total)}</b> · Vendió: {cancelarModal.ticket.cajera}
+              <div style={{ fontSize: 13, color: "#8A93A3", marginTop: 4 }}>Al cancelar, el stock de los productos regresa al inventario.</div>
+            </div>
+            <label style={S.label}>Motivo de la cancelación *</label>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {[["error_captura", "✏️ Error de captura"], ["cliente_desistio", "🙅 Cliente desistió"], ["cobro_doble", "💰 Cobro doble"], ["otro", "❓ Otro"]].map(([k, label]) => (
+                <button key={k} style={{ ...S.methodBtn, ...(cancelarModal.motivo === k ? { borderColor: "#E11D48", background: "#FFF1F2", color: "#E11D48" } : {}) }}
+                  onClick={() => setCancelarModal({ ...cancelarModal, motivo: k })}>{label}</button>
+              ))}
+            </div>
+            <label style={S.label}>Nota (opcional)</label>
+            <input style={S.input} value={cancelarModal.nota}
+              placeholder="Detalle adicional…"
+              onChange={(e) => setCancelarModal({ ...cancelarModal, nota: e.target.value })} />
+            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 8 }}>
+              La cancelación queda registrada permanentemente con tu nombre, fecha y motivo.
+            </div>
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setCancelarModal(null)}>Cerrar</button>
+              <button style={{ ...S.deleteBtn, opacity: (cancelarModal.motivo && !procesando) ? 1 : 0.4 }}
+                disabled={!cancelarModal.motivo || procesando}
+                onClick={ejecutarCancelacion}>
+                {procesando ? "Procesando…" : "🚫 Confirmar cancelación"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ---------- dar de baja del almacén (merma con motivo) ---------- */}
       {darBaja && (
         <div style={S.overlay} className="no-print">
@@ -1864,10 +1930,43 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </tbody>
             </table>
           </div>
+
+          {/* Reporte de cancelaciones — auditoría */}
+          <div style={{ ...S.card, marginTop: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={S.cardTitle}>🚫 Reporte de cancelaciones — {marcaActiva.corto}</div>
+              <span style={{ fontSize: 12, color: "#8A93A3" }}>🔒 Registro permanente</span>
+            </div>
+            {cancelaciones.length === 0 && <div style={S.emptyCart}>No hay cancelaciones registradas en esta sucursal.</div>}
+            {cancelaciones.length > 0 && (
+              <table style={S.table}>
+                <thead><tr><th style={S.th}>Fecha</th><th style={S.th}>Folio</th><th style={S.thR}>Monto</th><th style={S.th}>Motivo</th><th style={S.th}>Vendió</th><th style={S.th}>Canceló</th><th style={S.th}>Nota</th></tr></thead>
+                <tbody>
+                  {cancelaciones.map((c) => {
+                    const motLabel = { error_captura: "✏️ Error de captura", cliente_desistio: "🙅 Cliente desistió", cobro_doble: "💰 Cobro doble", otro: "❓ Otro" }[c.motivo] || c.motivo;
+                    return (
+                      <tr key={c.id}>
+                        <td style={S.td}>{fechaLarga(c.fecha)}</td>
+                        <td style={S.td}>#{String(c.folio).padStart(4, "0")}</td>
+                        <td style={{ ...S.td, textAlign: "right", color: "#E11D48", fontWeight: 700 }}>{money(c.total)}</td>
+                        <td style={S.td}>{motLabel}</td>
+                        <td style={S.td}>{c.cajera_venta}</td>
+                        <td style={S.td}>{c.usuario}</td>
+                        <td style={{ ...S.td, fontSize: 13, color: "#8A93A3" }}>{c.nota}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+            {cancelaciones.length > 0 && (
+              <div style={{ marginTop: 10, fontSize: 14, fontWeight: 700, textAlign: "right", color: "#E11D48" }}>
+                Total cancelado: {money(cancelaciones.reduce((s, c) => s + Number(c.total || 0), 0))} · {cancelaciones.length} cancelaciones
+              </div>
+            )}
+          </div>
         </div>
       )}
-
-      {/* ==================== USUARIOS (admin) ==================== */}
       {view === "usuarios" && esAdmin && (
         <div style={S.page} className="no-print">
           <div style={S.card}>
