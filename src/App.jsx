@@ -45,6 +45,7 @@ function Barcode39({ value, height = 54, narrow = 2 }) {
 const money = (n) => Number(n || 0).toLocaleString("es-MX", { style: "currency", currency: "MXN" });
 const hoyStr = (d = new Date()) => d.toISOString().slice(0, 10);
 const horaStr = (iso) => new Date(iso).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
+const rolLabel = (rol) => rol === "propietario" ? "Propietario" : rol === "admin" ? "Supervisor" : "Cajera";
 const fechaLarga = (iso) => new Date(iso).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" });
 
 const TURNOS = [
@@ -126,7 +127,7 @@ export default function App() {
   const [monitor, setMonitor] = useState(null);
 
   const scanRef = useRef(null);
-  const esAdmin = perfil?.rol === "admin";
+  const esAdmin = perfil?.rol === "admin" || perfil?.rol === "propietario";
 
   /* ============ DETECTOR DE ACTUALIZACIÓN ============ */
   // Lee el index.html del servidor (sin caché) y compara el bundle cargado.
@@ -177,14 +178,15 @@ export default function App() {
         await supabase.auth.signOut();
         return;
       }
-      if (data.rol !== "admin" && SUC_ENV && data.sucursal !== SUC_ENV) {
+      const rolAdmin = data.rol === "admin" || data.rol === "propietario";
+      if (!rolAdmin && SUC_ENV && data.sucursal !== SUC_ENV) {
         setLoginErr(`Esta terminal es de ${SUCURSALES[SUC_ENV].nombre}. Tu usuario pertenece a ${SUCURSALES[data.sucursal].nombre}.`);
         await supabase.auth.signOut();
         return;
       }
       setPerfil(data);
-      setSucursal(data.rol === "admin" ? (SUC_ENV || "barcelona") : data.sucursal);
-      setView(data.rol === "admin" ? "monitoreo" : "ventas");
+      setSucursal(rolAdmin ? (SUC_ENV || "barcelona") : data.sucursal);
+      setView(rolAdmin ? "monitoreo" : "ventas");
     })();
   }, [session]);
 
@@ -701,6 +703,8 @@ export default function App() {
   const guardarUsuario = async () => {
     setErrorMsg("");
     if (!userForm.usuario || !userForm.nombre) return;
+    // admin y propietario ven ambos moteles; se les asigna una sucursal base
+    const sucFinal = (userForm.rol === "cajera") ? userForm.sucursal : (userForm.sucursal || "barcelona");
     try {
       if (userForm.id) {
         // Editar: usa la Edge Function (permite cambiar usuario/contraseña de forma segura)
@@ -710,7 +714,7 @@ export default function App() {
           usuario: userForm.usuario.trim().toLowerCase(),
           nombre: userForm.nombre.trim(),
           rol: userForm.rol,
-          sucursal: userForm.sucursal,
+          sucursal: sucFinal,
           ...(userForm.passNueva ? { password: userForm.passNueva } : {}),
         });
       } else {
@@ -723,7 +727,7 @@ export default function App() {
         if (error || !data.user) { setErrorMsg("No se pudo crear el usuario: " + (error?.message || "")); return; }
         const { error: e2 } = await supabase.from("perfiles").insert({
           id: data.user.id, usuario: userForm.usuario.trim().toLowerCase(),
-          nombre: userForm.nombre.trim(), rol: userForm.rol, sucursal: userForm.sucursal,
+          nombre: userForm.nombre.trim(), rol: userForm.rol, sucursal: sucFinal,
         });
         if (e2) { setErrorMsg("Usuario creado pero falló el perfil: " + e2.message); return; }
       }
@@ -994,7 +998,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           )}
           <div style={{ flex: 1 }} />
           <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 15, fontWeight: 700 }}>{perfil.nombre} <span style={S.rolPill}>{perfil.rol}</span></div>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>{perfil.nombre} <span style={S.rolPill}>{rolLabel(perfil.rol)}</span></div>
             <div style={{ fontSize: 12, color: "#B8C0D0" }}>
               T{turnoActual()} · en línea · {agenteOk ? "🖨️ directa" : "🖨️ navegador"} ·{" "}
               <button onClick={(e) => { e.stopPropagation(); salir(); }} style={S.linkBtn}>Cerrar sesión</button>
@@ -1878,8 +1882,8 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                   <tr key={u.id}>
                     <td style={S.td}>{u.nombre}</td>
                     <td style={S.td}><span style={S.codePill}>{u.usuario}</span></td>
-                    <td style={{ ...S.td, textAlign: "center" }}><span style={S.rolPillDark}>{u.rol}</span></td>
-                    <td style={{ ...S.td, textAlign: "center" }}>{SUCURSALES[u.sucursal]?.corto}</td>
+                    <td style={{ ...S.td, textAlign: "center" }}><span style={S.rolPillDark}>{rolLabel(u.rol)}</span></td>
+                    <td style={{ ...S.td, textAlign: "center" }}>{(u.rol === "admin" || u.rol === "propietario") ? "Ambos" : SUCURSALES[u.sucursal]?.corto}</td>
                     <td style={{ ...S.td, textAlign: "center" }}>
                       <button style={S.miniBtn} onClick={() => setUserForm({ ...u, passNueva: "" })}>✏️ Editar</button>
                     </td>
@@ -1920,19 +1924,28 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </button>
             </div>
             <label style={S.label}>Rol</label>
-            <div style={{ display: "flex", gap: 8 }}>
-              {["cajera", "admin"].map((r) => (
-                <button key={r} style={{ ...S.methodBtn, flex: 1, ...(userForm.rol === r ? S.methodOn : {}) }}
-                  onClick={() => setUserForm({ ...userForm, rol: r })}>{r === "admin" ? "👑 Administrador" : "🧾 Cajera"}</button>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[["cajera", "🧾 Cajera"], ["admin", "👑 Supervisor"], ["propietario", "⭐ Propietario"]].map(([r, label]) => (
+                <button key={r} style={{ ...S.methodBtn, flex: 1, minWidth: 120, ...(userForm.rol === r ? S.methodOn : {}) }}
+                  onClick={() => setUserForm({ ...userForm, rol: r })}>{label}</button>
               ))}
             </div>
-            <label style={S.label}>Sucursal</label>
-            <div style={{ display: "flex", gap: 8 }}>
-              {Object.entries(SUCURSALES).map(([k, s]) => (
-                <button key={k} style={{ ...S.methodBtn, flex: 1, ...(userForm.sucursal === k ? S.methodOn : {}) }}
-                  onClick={() => setUserForm({ ...userForm, sucursal: k })}>{s.corto}</button>
-              ))}
-            </div>
+            {(userForm.rol === "admin" || userForm.rol === "propietario") && (
+              <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 4 }}>
+                {userForm.rol === "propietario" ? "Propietario" : "Supervisor"}: acceso total a ambos moteles (ventas, inventario, almacén, cortes, usuarios y monitoreo).
+              </div>
+            )}
+            {userForm.rol === "cajera" && (
+              <>
+                <label style={S.label}>Sucursal</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {Object.entries(SUCURSALES).map(([k, s]) => (
+                    <button key={k} style={{ ...S.methodBtn, flex: 1, ...(userForm.sucursal === k ? S.methodOn : {}) }}
+                      onClick={() => setUserForm({ ...userForm, sucursal: k })}>{s.corto}</button>
+                  ))}
+                </div>
+              </>
+            )}
             <div style={{ ...S.modalActions, justifyContent: "space-between" }}>
               {userForm.id && userForm.id !== perfil.id ? (
                 <button style={S.deleteBtn} onClick={() => eliminarUsuario(userForm)}>🗑️ Eliminar usuario</button>
