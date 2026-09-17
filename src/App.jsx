@@ -123,6 +123,7 @@ export default function App() {
   const [resurtir, setResurtir] = useState(null);
   const [userForm, setUserForm] = useState(null);
   const [corteVista, setCorteVista] = useState(null);
+  const [preCorte, setPreCorte] = useState(null); // arqueo rápido sin cerrar turno
   const [busquedaTicket, setBusquedaTicket] = useState("");
 
   /* ---------- monitoreo ---------- */
@@ -590,6 +591,52 @@ export default function App() {
     setCorteVista(c);
   };
 
+  // Pre-corte: arqueo rápido de "cómo voy", sin cerrar el turno ni guardar nada
+  const generarPreCorte = async () => {
+    setErrorMsg("");
+    const { data: pend, error } = await supabase.from("tickets").select("*")
+      .eq("sucursal", sucursal).is("corte_id", null);
+    if (error) { setErrorMsg("No se pudo consultar: " + error.message); return; }
+    const lista = pend || [];
+    const validos = lista.filter((t) => !t.cancelado);
+    setPreCorte({
+      sucursal, turno: turnoActual(), cajera: perfil.nombre,
+      fecha: new Date().toISOString(),
+      total: validos.reduce((s, t) => s + Number(t.total), 0),
+      num_ventas: validos.length,
+      cancelados: lista.length - validos.length,
+      inventario: products.map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock })),
+    });
+  };
+
+  // convierte el pre-corte a líneas ESC/POS para el agente
+  const preCorteALineas = (c) => {
+    const suc = SUCURSALES[c.sucursal];
+    const tn = TURNOS.find((t) => t.n === c.turno) || TURNOS[0];
+    const L = [
+      { t: suc.nombre, align: "center", bold: true, size: 2 },
+      { t: "PRE-CORTE / ARQUEO", align: "center", bold: true },
+      { t: "(no cierra el turno)", align: "center" },
+      { t: fechaLarga(c.fecha), align: "center" },
+      { t: `${tn.nombre} (${tn.rango})`, align: "center" },
+      { t: `Cajera: ${c.cajera}`, align: "center" },
+      { hr: true },
+      { row: ["EFECTIVO ESPERADO", money(c.total).replace("MX$", "$")], bold: true, size: 2 },
+      { row: ["Ventas", String(c.num_ventas)] },
+      { row: ["Canceladas", String(c.cancelados)] },
+      { hr: true },
+      { t: "INVENTARIO PARA CONTEO", align: "center", bold: true },
+    ];
+    (c.inventario || []).forEach((p) => L.push({ row: [p.nombre, `${p.stock} u`] }));
+    L.push({ feed: 1 });
+    L.push({ t: "Efectivo contado: ____________" });
+    L.push({ feed: 1 });
+    L.push({ t: "Diferencia: __________________" });
+    L.push({ feed: 1 });
+    L.push({ t: "Firma: _______________________" });
+    return L;
+  };
+
   const corteTexto = (c) => {
     const tn = TURNOS.find((t) => t.n === c.turno) || TURNOS[0];
     return [
@@ -1044,10 +1091,16 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 style={{ ...S.navBtn, ...(view === k ? S.navBtnOn : {}) }}>{label}</button>
             ))}
           </nav>
-          <button onClick={(e) => { e.stopPropagation(); cerrarTurno(); }}
-            style={S.corteNavBtn} title="Generar el corte de todas las ventas del turno">
-            🗂️ Corte de turno
-          </button>
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button onClick={(e) => { e.stopPropagation(); generarPreCorte(); }}
+              style={S.preCorteBtn} title="Arqueo rápido sin cerrar el turno">
+              🔎 Pre-corte
+            </button>
+            <button onClick={(e) => { e.stopPropagation(); cerrarTurno(); }}
+              style={S.corteNavBtn} title="Generar el corte de todas las ventas del turno">
+              🗂️ Corte de turno
+            </button>
+          </div>
         </div>
       </header>
 
@@ -1309,6 +1362,46 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 }
                 imprimir();
               }}>🖨️ Imprimir corte</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- pre-corte / arqueo rápido (vista imprimible) ---------- */}
+      {preCorte && (
+        <div style={S.overlay} onClick={(e) => e.stopPropagation()}>
+          <div style={{ ...S.modal, maxWidth: 360 }}>
+            <div id="print-area" style={S.ticket}>
+              <div style={{ textAlign: "center", fontWeight: 800, letterSpacing: 2 }}>{SUCURSALES[preCorte.sucursal].nombre}</div>
+              <div style={{ textAlign: "center", fontWeight: 700 }}>PRE-CORTE / ARQUEO</div>
+              <div style={{ textAlign: "center", fontSize: 10 }}>(no cierra el turno)</div>
+              <div style={{ textAlign: "center", fontSize: 11 }}>
+                {fechaLarga(preCorte.fecha)}<br />
+                {(TURNOS.find((t) => t.n === preCorte.turno) || TURNOS[0]).nombre} ({(TURNOS.find((t) => t.n === preCorte.turno) || TURNOS[0]).rango})<br />
+                Cajera: {preCorte.cajera}
+              </div>
+              <hr style={S.hr} />
+              <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>EFECTIVO ESPERADO</span><span>{money(preCorte.total)}</span></div>
+              <div style={S.tkRow}><span>Ventas</span><span>{preCorte.num_ventas}</span></div>
+              <div style={S.tkRow}><span>Canceladas</span><span>{preCorte.cancelados}</span></div>
+              <hr style={S.hr} />
+              <div style={{ textAlign: "center", fontWeight: 700, fontSize: 12 }}>INVENTARIO PARA CONTEO</div>
+              {(preCorte.inventario || []).map((p, i) => (
+                <div key={i} style={{ ...S.tkRow, fontSize: 11 }}><span>{p.nombre}</span><span><b>{p.stock}</b> u</span></div>
+              ))}
+              <div style={{ marginTop: 22, fontSize: 11 }}>Efectivo contado: ______________</div>
+              <div style={{ marginTop: 14, fontSize: 11 }}>Diferencia: ______________</div>
+              <div style={{ marginTop: 14, fontSize: 11 }}>Firma: ______________</div>
+            </div>
+            <div style={S.modalActions} className="no-print">
+              <button style={S.ghostBtn} onClick={() => { setPreCorte(null); refocus(); }}>Cerrar</button>
+              <button style={S.payBtn} onClick={async () => {
+                if (agenteOk) {
+                  try { await imprimirPorAgente(preCorteALineas(preCorte), false); return; }
+                  catch (e) { setErrorMsg("Agente: " + e.message + " — usando impresión del navegador."); }
+                }
+                imprimir();
+              }}>🖨️ Imprimir pre-corte</button>
             </div>
           </div>
         </div>
@@ -2115,7 +2208,8 @@ const S = {
   totalAmt: { fontSize: 34, fontWeight: 800, fontFamily: "ui-monospace, monospace" },
   payBtn: { background: "#0E9F6E", color: "#fff", border: "none", borderRadius: 10, padding: "14px 26px", fontSize: 17, fontWeight: 800, cursor: "pointer" },
   corteBtn: { background: "transparent", color: "#FCA311", border: "2px solid #FCA311", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 800, cursor: "pointer" },
-  corteNavBtn: { background: "#FCA311", color: "#14213D", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 15, fontWeight: 800, cursor: "pointer", marginLeft: "auto" },
+  corteNavBtn: { background: "#FCA311", color: "#14213D", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 15, fontWeight: 800, cursor: "pointer" },
+  preCorteBtn: { background: "transparent", color: "#FCA311", border: "1.5px solid #FCA311", borderRadius: 8, padding: "10px 18px", fontSize: 15, fontWeight: 700, cursor: "pointer" },
   ghostBtn: { background: "#fff", color: "#455", border: "1px solid #D7DCE5", borderRadius: 10, padding: "12px 20px", fontSize: 15, cursor: "pointer" },
   deleteBtn: { background: "#FFF1F2", color: "#E11D48", border: "1px solid #FECDD3", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
 
