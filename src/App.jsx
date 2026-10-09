@@ -100,6 +100,7 @@ export default function App() {
   const [procesando, setProcesando] = useState(false);
   const [cancelarModal, setCancelarModal] = useState(null); // {ticket, motivo, nota}
   const [cancelaciones, setCancelaciones] = useState([]);
+  const [resguardoVista, setResguardoVista] = useState(null); // nota de procedimiento para preparados cancelados
   const [almFilter, setAlmFilter] = useState("");
   const [perfiles, setPerfiles] = useState([]);
   const [cargando, setCargando] = useState(false);
@@ -456,7 +457,7 @@ export default function App() {
     setCart((c) => {
       const i = c.findIndex((x) => x.id === p.id);
       if (i >= 0) { const n = [...c]; n[i] = { ...n[i], cant: n[i].cant + 1 }; return n; }
-      return [...c, { id: p.id, nombre: p.nombre, codigo: p.codigo, precio: Number(p.precio), cant: 1 }];
+      return [...c, { id: p.id, nombre: p.nombre, codigo: p.codigo, precio: Number(p.precio), cant: 1, preparado: !!p.preparado }];
     });
     setFlash(p); setTimeout(() => setFlash(null), 1200);
   };
@@ -528,28 +529,43 @@ export default function App() {
     if (!motivo) { setErrorMsg("Elige el motivo de la cancelación."); return; }
     setProcesando(true); setErrorMsg("");
     try {
+      // Separar: empaquetados (regresan al inventario) vs preparados (resguardo)
+      const empaquetados = (t.items || []).filter((it) => !it.preparado);
+      const preparados = (t.items || []).filter((it) => it.preparado);
+
       // 1) marcar el ticket como cancelado
       const { error } = await supabase.from("tickets").update({ cancelado: true }).eq("id", t.id);
       if (error) throw error;
-      // 2) devolver el stock al inventario
-      for (const it of t.items) {
+      // 2) devolver al inventario SOLO los empaquetados de fábrica
+      for (const it of empaquetados) {
         const p = products.find((x) => x.id === it.id);
         if (p) await supabase.from("productos").update({ stock: p.stock + it.cant }).eq("id", it.id);
       }
-      // 3) registrar la cancelación (auditoría permanente)
+      // 3) nota de resguardo para los preparados
+      const notaPrep = preparados.length
+        ? `RESGUARDO: ${preparados.map((p) => `${p.cant}x ${p.nombre}`).join(", ")} — sellar, marcar "Devuelto/Cancelado por huésped", refrigerar y esperar verificación del supervisor.`
+        : "";
+      const notaFinal = [(cancelarModal.nota || "").trim(), notaPrep].filter(Boolean).join(" | ");
+
+      // 4) registrar la cancelación (auditoría permanente)
       const { data: cData } = await supabase.from("cancelaciones").insert({
         ticket_id: t.id, folio: t.folio, sucursal: t.sucursal, turno: t.turno,
-        total: t.total, motivo, nota: (cancelarModal.nota || "").trim(),
+        total: t.total, motivo, nota: notaFinal,
         cajera_venta: t.cajera, usuario: perfil.nombre,
       }).select().single();
       setTickets((ts) => ts.map((x) => (x.id === t.id ? { ...x, cancelado: true } : x)));
       setProducts((ps) => ps.map((p) => {
-        const it = t.items.find((x) => x.id === p.id);
+        const it = empaquetados.find((x) => x.id === p.id);
         return it ? { ...p, stock: p.stock + it.cant } : p;
       }));
       if (cData) setCancelaciones((cs) => [cData, ...cs]);
+      // si había preparados, mostrar la nota de procedimiento e imprimirla
+      if (preparados.length) {
+        setResguardoVista({ folio: t.folio, sucursal: t.sucursal, items: preparados, cajera: perfil.nombre, fecha: new Date().toISOString() });
+      } else {
+        setErrorMsg(`✓ Ticket #${String(t.folio).padStart(4, "0")} cancelado. Stock devuelto al inventario.`);
+      }
       setCancelarModal(null);
-      setErrorMsg(`✓ Ticket #${String(t.folio).padStart(4, "0")} cancelado. Stock devuelto al inventario.`);
     } catch (err) {
       setErrorMsg("No se pudo cancelar: " + (err?.message || ""));
     }
@@ -675,7 +691,7 @@ export default function App() {
   }, [products]);
 
   const nuevoProducto = () =>
-    setForm({ id: null, nombre: "", codigo: "", interno: false, precio: "", stock: "", stock_min: "", stock_max: "", rapido: false, emoji: "📦" });
+    setForm({ id: null, nombre: "", codigo: "", interno: false, precio: "", stock: "", stock_min: "", stock_max: "", rapido: false, preparado: false, emoji: "📦" });
 
   const guardarProducto = async () => {
     if (!form.nombre || !form.precio) return;
@@ -685,7 +701,7 @@ export default function App() {
       sucursal, nombre: form.nombre.trim(), codigo, interno,
       precio: parseFloat(form.precio) || 0, stock: parseInt(form.stock) || 0,
       stock_min: parseInt(form.stock_min) || 0, stock_max: parseInt(form.stock_max) || 0,
-      rapido: form.rapido, emoji: form.emoji || "📦",
+      rapido: form.rapido, preparado: !!form.preparado, emoji: form.emoji || "📦",
     };
     let guardado;
     if (form.id) {
@@ -876,7 +892,8 @@ export default function App() {
     if (t.habitacion) L.push({ t: t.habitacion, align: "center", bold: true, size: 2 });
     L.push({ hr: true });
     (t.items || []).forEach((it) =>
-      L.push({ row: [`${it.cant} x ${it.nombre}`, money(it.precio * it.cant).replace("MX$", "$")] }));
+      L.push({ row: [`${it.cant} x ${it.nombre}${it.preparado ? " *" : ""}`, money(it.precio * it.cant).replace("MX$", "$")] }));
+    if ((t.items || []).some((it) => it.preparado)) L.push({ t: "* = preparado en sitio" });
     L.push({ hr: true });
     L.push({ row: ["TOTAL", money(t.total).replace("MX$", "$")], bold: true, size: 2 });
     L.push({ feed: 1 });
@@ -1306,8 +1323,11 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               )}
               <hr style={S.hr} />
               {(ticketListo.items || []).map((it) => (
-                <div key={it.id} style={S.tkRow}><span style={{ flex: 1, marginRight: 6 }}>{it.cant} × {it.nombre}</span><span style={{ whiteSpace: "nowrap" }}>{money(it.precio * it.cant)}</span></div>
+                <div key={it.id} style={S.tkRow}><span style={{ flex: 1, marginRight: 6 }}>{it.cant} × {it.nombre}{it.preparado ? " 🍴" : ""}</span><span style={{ whiteSpace: "nowrap" }}>{money(it.precio * it.cant)}</span></div>
               ))}
+              {(ticketListo.items || []).some((it) => it.preparado) && (
+                <div style={{ fontSize: 10, color: "#555", marginTop: 4 }}>🍴 = preparado en sitio</div>
+              )}
               <hr style={S.hr} />
               <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>TOTAL</span><span>{money(ticketListo.total)}</span></div>
               <div style={{ textAlign: "center", fontSize: 11, marginTop: 10 }}>¡Gracias por su preferencia!</div>
@@ -1436,7 +1456,11 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       <td style={S.td}>#{String(t.folio).padStart(4, "0")}</td>
                       <td style={S.td}>{horaStr(t.fecha)}</td>
                       <td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(t.total)}</td>
-                      <td style={{ ...S.td, textAlign: "center" }}>{t.cancelado && <span style={{ ...S.stockPill, background: "#E11D48" }}>Cancelado</span>}</td>
+                      <td style={{ ...S.td, textAlign: "center" }}>
+                        {t.cancelado
+                          ? <span style={{ ...S.stockPill, background: "#E11D48" }}>Cancelado</span>
+                          : <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }} onClick={() => cancelarTicket(t)}>🚫 Cancelar</button>}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1458,7 +1482,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <tbody>
               {products.filter((p) => p.nombre.toLowerCase().includes(invFilter.toLowerCase()) || p.codigo.includes(invFilter)).map((p) => (
                 <tr key={p.id}>
-                  <td style={S.td}>{p.emoji} {p.nombre} {p.rapido && <span title="Botón rápido">⚡</span>}</td>
+                  <td style={S.td}>{p.emoji} {p.nombre} {p.rapido && <span title="Botón rápido">⚡</span>} {p.preparado && <span title="Producto preparado en sitio">🍴</span>}</td>
                   <td style={S.td}><span style={S.codePill}>{p.codigo}</span> {p.interno && <span style={S.internoPill}>interno</span>}</td>
                   <td style={{ ...S.td, textAlign: "right" }}>
                     {Number(p.precio) === 0
@@ -1535,6 +1559,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 Botón rápido en Ventas
               </label>
             </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: form.preparado ? "#FFF7ED" : "#F7F8FA", borderRadius: 10, border: form.preparado ? "1px solid #FCA311" : "1px solid #E5E8EE", cursor: "pointer" }}>
+              <input type="checkbox" checked={!!form.preparado} onChange={(e) => setForm({ ...form, preparado: e.target.checked })} />
+              <span style={{ fontSize: 15 }}>🍴 <b>Producto preparado</b> (snack hecho en sitio). Al cancelarse, no regresa al inventario y requiere resguardo para verificación del supervisor.</span>
+            </label>
             <div style={S.modalActions}>
               <button style={S.ghostBtn} onClick={() => setForm(null)}>Cancelar</button>
               <button style={S.payBtn} onClick={guardarProducto}>💾 Guardar{!form.codigo.trim() && " e imprimir etiqueta"}</button>
@@ -1921,14 +1949,85 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       )}
 
       {/* ---------- cancelar ticket (con motivo) ---------- */}
+      {/* ---------- nota de resguardo para preparados cancelados ---------- */}
+      {resguardoVista && (
+        <div style={S.overlay} onClick={(e) => e.stopPropagation()}>
+          <div style={{ ...S.modal, maxWidth: 380 }}>
+            <div id="print-area" style={S.ticket}>
+              <div style={{ textAlign: "center", fontWeight: 800, letterSpacing: 1 }}>{SUCURSALES[resguardoVista.sucursal].nombre}</div>
+              <div style={{ textAlign: "center", fontWeight: 800, fontSize: 15, marginTop: 4 }}>⚠ PRODUCTO EN RESGUARDO</div>
+              <div style={{ textAlign: "center", fontSize: 11 }}>Cancelación de preparado</div>
+              <hr style={S.hr} />
+              <div style={{ textAlign: "center", fontSize: 11, marginBottom: 6 }}>
+                Ticket #{String(resguardoVista.folio).padStart(4, "0")} · {fechaLarga(resguardoVista.fecha)}<br />
+                Cajera: {resguardoVista.cajera}
+              </div>
+              <hr style={S.hr} />
+              {resguardoVista.items.map((it, i) => (
+                <div key={i} style={{ ...S.tkRow, fontWeight: 700 }}><span>{it.cant} × {it.nombre}</span><span>🍴</span></div>
+              ))}
+              <hr style={S.hr} />
+              <div style={{ fontSize: 11, lineHeight: 1.5 }}>
+                <b>PROCEDIMIENTO:</b><br />
+                1. Sellar el empaque del producto.<br />
+                2. Marcarlo como "DEVUELTO / CANCELADO POR HUÉSPED".<br />
+                3. Meterlo a refrigeración.<br />
+                4. El supervisor debe verificar que la porción esté completa antes de reintegrarlo o desecharlo.
+              </div>
+              <div style={{ marginTop: 20, fontSize: 11 }}>Verificado por: ______________</div>
+              <div style={{ marginTop: 14, fontSize: 11 }}>Fecha de verificación: __________</div>
+            </div>
+            <div style={S.modalActions} className="no-print">
+              <button style={S.ghostBtn} onClick={() => { setResguardoVista(null); refocus(); }}>Cerrar</button>
+              <button style={S.payBtn} onClick={async () => {
+                if (agenteOk) {
+                  try {
+                    await imprimirPorAgente([
+                      { t: SUCURSALES[resguardoVista.sucursal].nombre, align: "center", bold: true },
+                      { t: "PRODUCTO EN RESGUARDO", align: "center", bold: true, size: 2 },
+                      { t: "Cancelacion de preparado", align: "center" },
+                      { hr: true },
+                      { t: `Ticket #${String(resguardoVista.folio).padStart(4, "0")}`, align: "center" },
+                      { t: fechaLarga(resguardoVista.fecha), align: "center" },
+                      { t: `Cajera: ${resguardoVista.cajera}`, align: "center" },
+                      { hr: true },
+                      ...resguardoVista.items.map((it) => ({ row: [`${it.cant} x ${it.nombre}`, "PREP"] })),
+                      { hr: true },
+                      { t: "PROCEDIMIENTO:", bold: true },
+                      { t: "1. Sellar el empaque." },
+                      { t: "2. Marcar: DEVUELTO/CANCELADO" },
+                      { t: "   POR HUESPED." },
+                      { t: "3. Meter a refrigeracion." },
+                      { t: "4. Supervisor verifica que la" },
+                      { t: "   porcion este completa." },
+                      { feed: 1 },
+                      { t: "Verificado por: ____________" },
+                      { feed: 1 },
+                      { t: "Fecha: _____________________" },
+                    ], false);
+                    return;
+                  } catch (e) { setErrorMsg("Agente: " + e.message); }
+                }
+                imprimir();
+              }}>🖨️ Imprimir nota de resguardo</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {cancelarModal && (
         <div style={S.overlay} className="no-print">
           <div style={S.modal}>
             <div style={S.modalTitle}>🚫 Cancelar ticket #{String(cancelarModal.ticket.folio).padStart(4, "0")}</div>
             <div style={{ fontSize: 14, marginBottom: 10 }}>
               Total: <b>{money(cancelarModal.ticket.total)}</b> · Vendió: {cancelarModal.ticket.cajera}
-              <div style={{ fontSize: 13, color: "#8A93A3", marginTop: 4 }}>Al cancelar, el stock de los productos regresa al inventario.</div>
+              <div style={{ fontSize: 13, color: "#8A93A3", marginTop: 4 }}>Los productos empaquetados de fábrica regresan al inventario automáticamente.</div>
             </div>
+            {(cancelarModal.ticket.items || []).some((it) => it.preparado) && (
+              <div style={{ background: "#FFF7ED", border: "1px solid #FCA311", borderRadius: 10, padding: "10px 12px", fontSize: 13, marginBottom: 10 }}>
+                🍴 <b>Este ticket tiene producto preparado.</b> No regresa al inventario. Al confirmar, se imprimirá una nota de resguardo con el procedimiento (sellar, refrigerar, verificación del supervisor).
+              </div>
+            )}
             <label style={S.label}>Motivo de la cancelación *</label>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {[["error_captura", "✏️ Error de captura"], ["cliente_desistio", "🙅 Cliente desistió"], ["cobro_doble", "💰 Cobro doble"], ["otro", "❓ Otro"]].map(([k, label]) => (
