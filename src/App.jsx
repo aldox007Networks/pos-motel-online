@@ -1058,7 +1058,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
   }
 
   const tabs = esAdmin
-    ? [["monitoreo", "🖥️ Monitoreo"], ["ventas", "🛒 Ventas"], ["inventario", "📦 Inventario"], ["almacen", "🏬 Almacén"], ["reportes", "📊 Estadísticas"], ["cortes", "🗂️ Cortes"], ["usuarios", "👥 Usuarios"]]
+    ? [["monitoreo", "🖥️ Monitoreo"], ["ventas", "🛒 Ventas"], ["tickets", "🧾 Tickets"], ["inventario", "📦 Inventario"], ["almacen", "🏬 Almacén"], ["reportes", "📊 Estadísticas"], ["cortes", "🗂️ Cortes"], ["usuarios", "👥 Usuarios"]]
     : [["ventas", "🛒 Ventas"], ["miresumen", "🧾 Mi resumen"]];
 
   const marcaActiva = SUCURSALES[sucursal];
@@ -1654,14 +1654,23 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             </div>
           </div>
 
-          <div style={{ ...S.card, marginTop: 16 }}>
+        </div>
+      )}
+
+      {/* ==================== TICKETS (admin) ==================== */}
+      {view === "tickets" && esAdmin && (
+        <div style={S.page} className="no-print">
+          <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>
+            Todas las ventas de {marcaActiva.nombre}. Desde aquí puedes cancelar una venta (pide motivo y queda registrada).
+          </div>
+          <div style={S.card}>
             <div style={S.cardTitle}>🧾 Historial de tickets</div>
             <input value={busquedaTicket} onChange={(e) => setBusquedaTicket(e.target.value)}
               placeholder="Buscar por folio, producto o cajera…" style={S.input} />
             <table style={S.table}>
               <thead><tr><th style={S.th}>Folio</th><th style={S.th}>Fecha</th><th style={S.th}>Habitación</th><th style={S.th}>Cajera</th><th style={S.thC}>Turno</th><th style={S.thR}>Total</th><th style={S.thC}>Estado</th><th style={S.thC}></th></tr></thead>
               <tbody>
-                {historial.slice(0, 50).map((t) => (
+                {historial.slice(0, 80).map((t) => (
                   <tr key={t.id} style={{ opacity: t.cancelado ? 0.5 : 1 }}>
                     <td style={S.td}>#{String(t.folio).padStart(4, "0")}</td>
                     <td style={S.td}>{String(t.fecha).slice(0, 10)} {horaStr(t.fecha)}</td>
@@ -1674,12 +1683,13 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                         : <span style={{ ...S.stockPill, background: "#0E9F6E" }}>OK</span>}
                     </td>
                     <td style={{ ...S.td, textAlign: "center" }}>
-                      {!t.cancelado && <button style={S.miniBtn} onClick={() => cancelarTicket(t)}>↩ Cancelar</button>}
+                      {!t.cancelado && <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }} onClick={() => cancelarTicket(t)}>🚫 Cancelar</button>}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {historial.length === 0 && <div style={S.emptyCart}>Aún no hay ventas registradas.</div>}
           </div>
         </div>
       )}
