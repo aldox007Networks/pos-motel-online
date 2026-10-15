@@ -99,6 +99,9 @@ export default function App() {
   const [darBaja, setDarBaja] = useState(null); // {producto, cantidad, motivo, nota} - baja del almacén
   const [bajas, setBajas] = useState([]);
   const [retornosList, setRetornosList] = useState([]);
+  const [categorias, setCategorias] = useState([]);
+  const [catForm, setCatForm] = useState(null); // alta/edición de categoría
+  const [catFiltro, setCatFiltro] = useState("todas"); // filtro activo en ventas
   const [procesando, setProcesando] = useState(false);
   const [cancelarModal, setCancelarModal] = useState(null); // {ticket, motivo, nota}
   const [cancelaciones, setCancelaciones] = useState([]);
@@ -248,6 +251,13 @@ export default function App() {
   }, []);
 
   useEffect(() => { if (perfil) cargarDatos(sucursal); }, [perfil, sucursal, cargarDatos]);
+
+  // categorías (compartidas entre ambos moteles)
+  const cargarCategorias = useCallback(async () => {
+    const { data, error } = await supabase.from("categorias").select("*").order("orden").order("nombre");
+    if (!error) setCategorias(data || []);
+  }, []);
+  useEffect(() => { if (perfil) cargarCategorias(); }, [perfil, cargarCategorias]);
 
   const cargarPerfiles = useCallback(async () => {
     const { data } = await supabase.from("perfiles").select("*").order("nombre");
@@ -695,7 +705,35 @@ export default function App() {
   }, [products]);
 
   const nuevoProducto = () =>
-    setForm({ id: null, nombre: "", codigo: "", interno: false, precio: "", stock: "", stock_min: "", stock_max: "", rapido: false, preparado: false, emoji: "📦" });
+    setForm({ id: null, nombre: "", codigo: "", interno: false, precio: "", stock: "", stock_min: "", stock_max: "", rapido: false, preparado: false, emoji: "📦", categoria: "" });
+
+  /* ---------- categorías (admin/propietario) ---------- */
+  const guardarCategoria = async () => {
+    const nombre = (catForm.nombre || "").trim();
+    if (!nombre) { setErrorMsg("Escribe el nombre de la categoría."); return; }
+    const payload = { nombre, emoji: catForm.emoji || "🏷️", orden: parseInt(catForm.orden) || 0 };
+    try {
+      if (catForm.id) {
+        const { data, error } = await supabase.from("categorias").update(payload).eq("id", catForm.id).select().single();
+        if (error) throw error;
+        setCategorias((xs) => xs.map((x) => (x.id === catForm.id ? data : x)).sort((a, b) => a.orden - b.orden || a.nombre.localeCompare(b.nombre)));
+      } else {
+        const { data, error } = await supabase.from("categorias").insert(payload).select().single();
+        if (error) throw error;
+        setCategorias((xs) => [...xs, data].sort((a, b) => a.orden - b.orden || a.nombre.localeCompare(b.nombre)));
+      }
+      setCatForm(null);
+    } catch (err) {
+      setErrorMsg("No se pudo guardar la categoría (¿nombre repetido?): " + (err?.message || ""));
+    }
+  };
+
+  const eliminarCategoria = async (cat) => {
+    if (!window.confirm(`¿Eliminar la categoría "${cat.nombre}"? Los productos que la tengan quedarán sin categoría.`)) return;
+    const { error } = await supabase.from("categorias").delete().eq("id", cat.id);
+    if (error) { setErrorMsg("No se pudo eliminar: " + error.message); return; }
+    setCategorias((xs) => xs.filter((x) => x.id !== cat.id));
+  };
 
   const guardarProducto = async () => {
     if (!form.nombre || !form.precio) return;
@@ -706,6 +744,7 @@ export default function App() {
       precio: parseFloat(form.precio) || 0, stock: parseInt(form.stock) || 0,
       stock_min: parseInt(form.stock_min) || 0, stock_max: parseInt(form.stock_max) || 0,
       rapido: form.rapido, preparado: !!form.preparado, emoji: form.emoji || "📦",
+      categoria: form.categoria || null,
     };
     let guardado;
     if (form.id) {
@@ -1325,8 +1364,24 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
 
           <aside style={S.col}>
             <div style={S.panelTitle}>Acceso rápido — sin código</div>
+            {categorias.length > 0 && (
+              <div style={S.catBar}>
+                <button style={{ ...S.catChip, ...(catFiltro === "todas" ? S.catChipOn : {}) }}
+                  onClick={(e) => { e.stopPropagation(); setCatFiltro("todas"); }}>Todos</button>
+                {categorias.map((c) => (
+                  <button key={c.id} style={{ ...S.catChip, ...(catFiltro === c.nombre ? S.catChipOn : {}) }}
+                    onClick={(e) => { e.stopPropagation(); setCatFiltro(c.nombre); }}>{c.emoji} {c.nombre}</button>
+                ))}
+                {products.some((p) => p.rapido && !p.categoria) && (
+                  <button style={{ ...S.catChip, ...(catFiltro === "__sin__" ? S.catChipOn : {}) }}
+                    onClick={(e) => { e.stopPropagation(); setCatFiltro("__sin__"); }}>Sin categoría</button>
+                )}
+              </div>
+            )}
             <div style={S.quickGrid}>
-              {products.filter((p) => p.rapido).map((p) => (
+              {products.filter((p) => p.rapido)
+                .filter((p) => catFiltro === "todas" ? true : catFiltro === "__sin__" ? !p.categoria : p.categoria === catFiltro)
+                .map((p) => (
                 <button key={p.id} style={S.quickBtn} onClick={(e) => { e.stopPropagation(); addToCart(p); }}>
                   <span style={{ fontSize: 34 }}>{p.emoji}</span>
                   <span style={S.quickName}>{p.nombre}</span>
@@ -1522,16 +1577,35 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       {/* ==================== INVENTARIO (admin) ==================== */}
       {view === "inventario" && esAdmin && (
         <div style={S.page} className="no-print">
+          {/* Gestión de categorías (compartidas) */}
+          <div style={{ ...S.card, marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={S.cardTitle}>🏷️ Categorías de productos</div>
+              <button style={S.payBtn} onClick={() => setCatForm({ id: null, nombre: "", emoji: "🏷️", orden: "" })}>＋ Nueva categoría</button>
+            </div>
+            <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>Las categorías son compartidas entre ambos moteles y organizan la pantalla de ventas.</div>
+            {categorias.length === 0 && <div style={S.emptyCart}>Aún no hay categorías. Crea algunas (ej. Bebidas, Botanas, Higiene, Íntimos).</div>}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {categorias.map((c) => (
+                <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 6, border: "1px solid #D7DCE5", borderRadius: 20, padding: "6px 10px 6px 14px", fontSize: 15 }}>
+                  <span style={{ fontWeight: 700 }}>{c.emoji} {c.nombre}</span>
+                  <button style={{ ...S.miniBtn, padding: "4px 8px" }} onClick={() => setCatForm({ ...c, orden: String(c.orden || "") })}>✏️</button>
+                  <button style={{ ...S.miniBtn, padding: "4px 8px" }} onClick={() => eliminarCategoria(c)}>🗑️</button>
+                </div>
+              ))}
+            </div>
+          </div>
           <div style={S.pageHead}>
             <input value={invFilter} onChange={(e) => setInvFilter(e.target.value)} placeholder="Filtrar productos…" style={S.filterInput} />
             <button style={S.payBtn} onClick={nuevoProducto}>＋ Nuevo producto</button>
           </div>
           <table style={S.table}>
-            <thead><tr><th style={S.th}>Producto</th><th style={S.th}>Código</th><th style={S.thR}>Precio</th><th style={S.thC}>Stock</th><th style={S.thC}>Mín / Máx</th><th style={S.thC}>Acciones</th></tr></thead>
+            <thead><tr><th style={S.th}>Producto</th><th style={S.th}>Categoría</th><th style={S.th}>Código</th><th style={S.thR}>Precio</th><th style={S.thC}>Stock</th><th style={S.thC}>Mín / Máx</th><th style={S.thC}>Acciones</th></tr></thead>
             <tbody>
               {products.filter((p) => p.nombre.toLowerCase().includes(invFilter.toLowerCase()) || p.codigo.includes(invFilter)).map((p) => (
                 <tr key={p.id}>
                   <td style={S.td}>{p.emoji} {p.nombre} {p.rapido && <span title="Botón rápido">⚡</span>} {p.preparado && <span title="Producto preparado en sitio">🍴</span>}</td>
+                  <td style={{ ...S.td, fontSize: 13 }}>{p.categoria ? <span style={S.codePill}>{p.categoria}</span> : <span style={{ color: "#B8C0D0" }}>—</span>}</td>
                   <td style={S.td}><span style={S.codePill}>{p.codigo}</span> {p.interno && <span style={S.internoPill}>interno</span>}</td>
                   <td style={{ ...S.td, textAlign: "right" }}>
                     {Number(p.precio) === 0
@@ -1585,6 +1659,30 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       )}
 
       {/* ---------- alta producto ---------- */}
+      {/* ---------- alta/edición de categoría ---------- */}
+      {catForm && (
+        <div style={S.overlay} className="no-print">
+          <div style={S.modal}>
+            <div style={S.modalTitle}>{catForm.id ? "Editar categoría" : "Nueva categoría"}</div>
+            <label style={S.label}>Nombre *</label>
+            <input style={S.input} value={catForm.nombre} autoFocus
+              placeholder="Ej. Bebidas, Botanas, Higiene, Íntimos…"
+              onChange={(e) => setCatForm({ ...catForm, nombre: e.target.value })} />
+            <div style={S.formRow}>
+              <div style={{ flex: 1 }}><label style={S.label}>Emoji</label>
+                <input style={S.input} value={catForm.emoji} onChange={(e) => setCatForm({ ...catForm, emoji: e.target.value })} /></div>
+              <div style={{ flex: 1 }}><label style={S.label}>Orden (menor = primero)</label>
+                <input type="number" style={S.input} value={catForm.orden} placeholder="0"
+                  onChange={(e) => setCatForm({ ...catForm, orden: e.target.value })} /></div>
+            </div>
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setCatForm(null)}>Cancelar</button>
+              <button style={S.payBtn} onClick={guardarCategoria}>💾 Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {form && (
         <div style={S.overlay} className="no-print">
           <div style={S.modal}>
@@ -1604,6 +1702,11 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ flex: 1 }}><label style={S.label}>Stock máx.</label>
                 <input type="number" style={S.input} value={form.stock_max} onChange={(e) => setForm({ ...form, stock_max: e.target.value })} /></div>
             </div>
+            <label style={S.label}>Categoría</label>
+            <select style={S.input} value={form.categoria || ""} onChange={(e) => setForm({ ...form, categoria: e.target.value })}>
+              <option value="">— Sin categoría —</option>
+              {categorias.map((c) => <option key={c.id} value={c.nombre}>{c.emoji} {c.nombre}</option>)}
+            </select>
             <div style={S.formRow}>
               <div style={{ flex: 1 }}><label style={S.label}>Emoji</label>
                 <input style={S.input} value={form.emoji} onChange={(e) => setForm({ ...form, emoji: e.target.value })} /></div>
@@ -2443,6 +2546,9 @@ const S = {
   panelTitle: { fontSize: 12, textTransform: "uppercase", letterSpacing: 2, color: "#667", fontWeight: 700 },
   quickGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10 },
   quickBtn: { background: "#fff", border: "2px solid #D7DCE5", borderRadius: 14, padding: "14px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, cursor: "pointer", minHeight: 110 },
+  catBar: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 },
+  catChip: { background: "#fff", border: "2px solid #D7DCE5", borderRadius: 20, padding: "8px 16px", fontSize: 15, fontWeight: 700, cursor: "pointer", color: "#14213D" },
+  catChipOn: { background: "#14213D", color: "#fff", borderColor: "#14213D" },
   habGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(90px, 1fr))", gap: 12, marginTop: 16 },
   habBtn: { background: "#fff", border: "3px solid #14213D", borderRadius: 14, padding: "22px 8px", fontSize: 30, fontWeight: 800, cursor: "pointer", color: "#14213D", minHeight: 80 },
   mostradorBtn: { width: "100%", background: "#14213D", color: "#fff", border: "none", borderRadius: 14, padding: "18px", fontSize: 18, fontWeight: 800, cursor: "pointer", marginTop: 8 },
