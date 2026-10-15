@@ -292,7 +292,7 @@ export default function App() {
   }, [almacen]);
 
   const nuevoAlmProducto = () =>
-    setAlmForm({ id: null, nombre: "", codigo: "", interno: false, stock: "", stock_min: "", stock_max: "", emoji: "📦", costo: "", precio_venta: "" });
+    setAlmForm({ id: null, nombre: "", codigo: "", interno: false, stock: "", stock_min: "", stock_max: "", emoji: "📦", costo: "", precio_venta: "", categoria: "" });
 
   // cálculo de margen: ganancia en $ y en %
   const calcMargen = (costo, venta) => {
@@ -313,6 +313,7 @@ export default function App() {
       emoji: almForm.emoji || "📦",
       costo: parseFloat(almForm.costo) || 0,
       precio_venta: parseFloat(almForm.precio_venta) || 0,
+      categoria: almForm.categoria || null,
     };
     if (almForm.id) {
       const { data, error } = await supabase.from("almacen").update(p).eq("id", almForm.id).select().single();
@@ -391,17 +392,17 @@ export default function App() {
       let creado = false;
       const precioVenta = Number(p.precio_venta) || 0;
       if (existentes && existentes.length > 0) {
-        // ya existe: sumar stock Y actualizar el precio al del almacén
+        // ya existe: sumar stock Y actualizar el precio y la categoría al del almacén
         const destino = existentes[0];
         const { error } = await supabase.from("productos")
-          .update({ stock: destino.stock + cant, precio: precioVenta }).eq("id", destino.id);
+          .update({ stock: destino.stock + cant, precio: precioVenta, categoria: p.categoria || destino.categoria || null }).eq("id", destino.id);
         if (error) throw error;
       } else {
-        // no existe: crear con el precio de venta del almacén
+        // no existe: crear con el precio y la categoría del almacén
         const { error } = await supabase.from("productos").insert({
           sucursal: suc, nombre: p.nombre, codigo: p.codigo, interno: p.interno,
           precio: precioVenta, stock: cant, stock_min: p.stock_min, stock_max: p.stock_max,
-          rapido: false, emoji: p.emoji,
+          rapido: true, emoji: p.emoji, categoria: p.categoria || null,
         });
         if (error) throw error;
         creado = true;
@@ -1867,7 +1868,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 const m = calcMargen(p.costo, p.precio_venta);
                 return (
                 <tr key={p.id}>
-                  <td style={S.td}>{p.emoji} {p.nombre}</td>
+                  <td style={S.td}>{p.emoji} {p.nombre}{p.categoria && <div style={{ fontSize: 11, color: "#8A93A3" }}>🏷️ {p.categoria}</div>}</td>
                   <td style={S.td}><span style={S.codePill}>{p.codigo}</span> {p.interno && <span style={S.internoPill}>interno</span>}</td>
                   <td style={{ ...S.td, textAlign: "center" }}>
                     <span style={{ ...S.stockPill, background: almStockColor(p) }}>{p.stock <= 0 ? "AGOTADO" : p.stock}</span>
@@ -2038,6 +2039,12 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 </div>
               );
             })()}
+            <label style={S.label}>Categoría</label>
+            <select style={S.input} value={almForm.categoria || ""} onChange={(e) => setAlmForm({ ...almForm, categoria: e.target.value })}>
+              <option value="">— Sin categoría —</option>
+              {categorias.map((c) => <option key={c.id} value={c.nombre}>{c.emoji} {c.nombre}</option>)}
+            </select>
+            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 4 }}>Al traspasar a un motel, el producto llega ya con esta categoría.</div>
             <label style={S.label}>Emoji</label>
             <input style={S.input} value={almForm.emoji} onChange={(e) => setAlmForm({ ...almForm, emoji: e.target.value })} />
             <div style={S.modalActions}>
