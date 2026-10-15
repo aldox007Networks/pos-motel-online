@@ -95,8 +95,10 @@ export default function App() {
   const [almResurtir, setAlmResurtir] = useState(null); // entrada de mercancía al almacén
   const [traspasar, setTraspasar] = useState(null); // {producto, cantidad, sucursal}
   const [eliminarPOS, setEliminarPOS] = useState(null); // {producto, causa} - eliminar del inventario POS
+  const [regresarAlm, setRegresarAlm] = useState(null); // {producto, cantidad, motivo, nota} - regresar al almacén sin eliminar
   const [darBaja, setDarBaja] = useState(null); // {producto, cantidad, motivo, nota} - baja del almacén
   const [bajas, setBajas] = useState([]);
+  const [retornosList, setRetornosList] = useState([]);
   const [procesando, setProcesando] = useState(false);
   const [cancelarModal, setCancelarModal] = useState(null); // {ticket, motivo, nota}
   const [cancelaciones, setCancelaciones] = useState([]);
@@ -257,15 +259,17 @@ export default function App() {
   const cargarAlmacen = useCallback(async () => {
     setErrorMsg("");
     try {
-      const [a, e, t, b] = await Promise.all([
+      const [a, e, t, b, r] = await Promise.all([
         supabase.from("almacen").select("*").order("nombre"),
         supabase.from("almacen_entradas").select("*").order("fecha", { ascending: false }).limit(30),
         supabase.from("traspasos").select("*").order("fecha", { ascending: false }).limit(30),
         supabase.from("bajas").select("*").order("fecha", { ascending: false }).limit(50),
+        supabase.from("retornos").select("*").order("fecha", { ascending: false }).limit(50),
       ]);
       if (a.error || e.error || t.error) throw a.error || e.error || t.error;
       setAlmacen(a.data); setAlmacenEntradas(e.data); setTraspasos(t.data);
       if (!b.error) setBajas(b.data);
+      if (!r.error) setRetornosList(r.data);
     } catch (err) {
       setErrorMsg("No se pudo cargar el almacén: " + (err?.message || ""));
     }
@@ -759,6 +763,51 @@ export default function App() {
         : "✓ Producto eliminado.");
     } catch (err) {
       setErrorMsg("No se pudo eliminar: " + (err?.message || ""));
+    }
+    setProcesando(false);
+  };
+
+  // Regresar artículos al almacén SIN eliminar el producto (devolución parcial o total del stock)
+  const ejecutarRegresoAlmacen = async () => {
+    if (procesando) return;
+    const p = regresarAlm.producto;
+    const cant = parseInt(regresarAlm.cantidad) || 0;
+    const motivo = regresarAlm.motivo;
+    if (!motivo) { setErrorMsg("Elige el motivo del regreso."); return; }
+    if (cant <= 0) { setErrorMsg("Indica la cantidad a regresar."); return; }
+    if (cant > p.stock) { setErrorMsg("No puedes regresar más de lo que hay (disponible: " + p.stock + ")."); return; }
+    setProcesando(true); setErrorMsg("");
+    try {
+      // 1) sumar la cantidad al almacén (emparejando por código)
+      const { data: enAlm } = await supabase.from("almacen").select("*").eq("codigo", p.codigo).limit(1);
+      if (enAlm && enAlm.length > 0) {
+        const a = enAlm[0];
+        const { error: e1 } = await supabase.from("almacen").update({ stock: a.stock + cant }).eq("id", a.id);
+        if (e1) throw e1;
+      } else {
+        // no existe en almacén: crearlo con esa cantidad para no perder unidades
+        const { error: e1 } = await supabase.from("almacen").insert({
+          nombre: p.nombre, codigo: p.codigo, interno: p.interno, stock: cant,
+          stock_min: p.stock_min || 0, stock_max: p.stock_max || 0, emoji: p.emoji,
+          costo: 0, precio_venta: p.precio || 0,
+        });
+        if (e1) throw e1;
+      }
+      // 2) descontar del inventario del motel (el producto SIGUE existiendo)
+      const { error: e2 } = await supabase.from("productos").update({ stock: p.stock - cant }).eq("id", p.id);
+      if (e2) throw e2;
+      // 3) registrar el retorno con motivo + nota
+      const motLabel = { sobrestock: "Sobrestock", mala_ubicacion: "Mala ubicación", reacomodo: "Reacomodo", baja_rotacion: "Baja rotación", otro: "Otro" }[motivo] || motivo;
+      const causaFinal = [motLabel, (regresarAlm.nota || "").trim()].filter(Boolean).join(" — ");
+      await supabase.from("retornos").insert({
+        sucursal, nombre: p.nombre, codigo: p.codigo, cantidad: cant,
+        causa: causaFinal, usuario: perfil.nombre,
+      });
+      setProducts((ps) => ps.map((x) => (x.id === p.id ? { ...x, stock: x.stock - cant } : x)));
+      setRegresarAlm(null);
+      setErrorMsg(`✓ Se regresaron ${cant} u de "${p.nombre}" al almacén general.`);
+    } catch (err) {
+      setErrorMsg("No se pudo regresar: " + (err?.message || ""));
     }
     setProcesando(false);
   };
@@ -1501,6 +1550,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       onClick={() => setResurtir({ producto: p, cantidad: p.stock_max > p.stock ? String(p.stock_max - p.stock) : "", nota: "" })}>
                       📥 Resurtir
                     </button>{" "}
+                    <button style={{ ...S.miniBtn, borderColor: "#B8860B", color: "#B8860B", fontWeight: 700 }}
+                      onClick={() => setRegresarAlm({ producto: p, cantidad: "", motivo: "", nota: "" })}>
+                      ↩ Regresar al almacén
+                    </button>{" "}
                     <button style={S.miniBtn} onClick={() => setLabelFor(p)}>🏷️</button>{" "}
                     <button style={S.miniBtn} onClick={() => setForm({ ...p, precio: String(p.precio), stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || "") })}>✏️</button>{" "}
                     <button style={S.miniBtn} onClick={() => setEliminarPOS({ producto: p, causa: "" })}>🗑️</button>
@@ -1819,6 +1872,29 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </div>
             )}
           </div>
+
+          {/* Regresos desde los moteles al almacén */}
+          <div style={{ ...S.card, marginTop: 16 }}>
+            <div style={S.cardTitle}>↩ Regresos de los moteles al almacén</div>
+            {retornosList.length === 0 && <div style={S.emptyCart}>Aún no hay regresos registrados.</div>}
+            {retornosList.length > 0 && (
+              <table style={S.table}>
+                <thead><tr><th style={S.th}>Fecha</th><th style={S.th}>Producto</th><th style={S.thC}>Cant.</th><th style={S.th}>Desde</th><th style={S.th}>Motivo / descripción</th><th style={S.th}>Registró</th></tr></thead>
+                <tbody>
+                  {retornosList.map((r) => (
+                    <tr key={r.id}>
+                      <td style={S.td}>{fechaLarga(r.fecha)}</td>
+                      <td style={S.td}>{r.nombre}</td>
+                      <td style={{ ...S.td, textAlign: "center", fontWeight: 700, color: "#B8860B" }}>+{r.cantidad}</td>
+                      <td style={S.td}>{SUCURSALES[r.sucursal]?.corto || r.sucursal}</td>
+                      <td style={{ ...S.td, fontSize: 13 }}>{r.causa}</td>
+                      <td style={S.td}>{r.usuario}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
         </div>
       )}
 
@@ -1930,6 +2006,48 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       )}
 
       {/* ---------- eliminar producto del POS (con causa y retorno al almacén) ---------- */}
+      {/* ---------- regresar artículos al almacén general (sin eliminar) ---------- */}
+      {regresarAlm && (
+        <div style={S.overlay} className="no-print">
+          <div style={S.modal}>
+            <div style={S.modalTitle}>↩ Regresar al almacén: {regresarAlm.producto.nombre}</div>
+            <div style={{ fontSize: 14, marginBottom: 10 }}>
+              En {marcaActiva.corto} hay <b>{regresarAlm.producto.stock}</b> u. Las que regreses saldrán de este motel y volverán al almacén general. El producto <b>no se elimina</b>.
+            </div>
+            <label style={S.label}>Motivo del regreso *</label>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {[["sobrestock", "📦 Sobrestock"], ["mala_ubicacion", "📍 Mala ubicación"], ["reacomodo", "🔄 Reacomodo"], ["baja_rotacion", "📉 Baja rotación"], ["otro", "❓ Otro"]].map(([k, label]) => (
+                <button key={k} style={{ ...S.methodBtn, ...(regresarAlm.motivo === k ? { borderColor: "#B8860B", background: "#FFF9EE", color: "#B8860B" } : {}) }}
+                  onClick={() => setRegresarAlm({ ...regresarAlm, motivo: k })}>{label}</button>
+              ))}
+            </div>
+            <label style={S.label}>Cantidad a regresar *</label>
+            <input type="number" style={S.bigInput} value={regresarAlm.cantidad} autoFocus
+              onChange={(e) => setRegresarAlm({ ...regresarAlm, cantidad: e.target.value })} />
+            {parseInt(regresarAlm.cantidad) > 0 && parseInt(regresarAlm.cantidad) <= regresarAlm.producto.stock && (
+              <div style={{ fontSize: 13, marginTop: 6, color: "#455" }}>
+                Quedarán <b>{regresarAlm.producto.stock - parseInt(regresarAlm.cantidad)}</b> u en {marcaActiva.corto}.
+              </div>
+            )}
+            <label style={S.label}>Descripción / nota (opcional)</label>
+            <input style={S.input} value={regresarAlm.nota}
+              placeholder="Detalle del porqué se regresa…"
+              onChange={(e) => setRegresarAlm({ ...regresarAlm, nota: e.target.value })} />
+            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 8 }}>
+              El regreso queda registrado con tu nombre, fecha, cantidad y motivo.
+            </div>
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setRegresarAlm(null)}>Cancelar</button>
+              <button style={{ ...S.payBtn, opacity: (regresarAlm.motivo && parseInt(regresarAlm.cantidad) > 0 && !procesando) ? 1 : 0.4 }}
+                disabled={!(regresarAlm.motivo && parseInt(regresarAlm.cantidad) > 0) || procesando}
+                onClick={ejecutarRegresoAlmacen}>
+                {procesando ? "Procesando…" : "↩ Confirmar regreso"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {eliminarPOS && (
         <div style={S.overlay} className="no-print">
           <div style={S.modal}>
