@@ -102,6 +102,7 @@ export default function App() {
   const [categorias, setCategorias] = useState([]);
   const [catForm, setCatForm] = useState(null); // alta/edición de categoría
   const [catFiltro, setCatFiltro] = useState("todas"); // filtro activo en ventas
+  const [turnosAbiertos, setTurnosAbiertos] = useState([]);
   const [procesando, setProcesando] = useState(false);
   const [cancelarModal, setCancelarModal] = useState(null); // {ticket, motivo, nota}
   const [cancelaciones, setCancelaciones] = useState([]);
@@ -192,6 +193,23 @@ export default function App() {
         setLoginErr(`Esta terminal es de ${SUCURSALES[SUC_ENV].nombre}. Tu usuario pertenece a ${SUCURSALES[data.sucursal].nombre}.`);
         await supabase.auth.signOut();
         return;
+      }
+      // Control de turnos: una caja = un turno abierto a la vez (solo cajeras)
+      if (!rolAdmin) {
+        const { data: turno } = await supabase.from("turnos_abiertos").select("*").eq("sucursal", data.sucursal).maybeSingle();
+        if (turno && turno.cajera_id && turno.cajera_id !== data.id) {
+          // hay un turno abierto de OTRA cajera en esta sucursal
+          setLoginErr(`⛔ Hay un turno abierto de ${turno.cajera_nombre} en ${SUCURSALES[data.sucursal].corto}. Debe hacer su corte de turno antes de que puedas iniciar uno nuevo. Si no está disponible, pide a un administrador que lo cierre.`);
+          await supabase.auth.signOut();
+          return;
+        }
+        if (!turno) {
+          // no hay turno abierto: esta cajera abre uno nuevo
+          await supabase.from("turnos_abiertos").insert({
+            sucursal: data.sucursal, cajera_id: data.id, cajera_nombre: data.nombre, turno: turnoActual(),
+          });
+        }
+        // si el turno abierto ya es de ESTA cajera, simplemente retoma (apagón/cierre accidental)
       }
       setPerfil(data);
       setSucursal(rolAdmin ? (SUC_ENV || "barcelona") : data.sucursal);
@@ -451,7 +469,38 @@ export default function App() {
       };
     }
     setMonitor(resultado);
+    // turnos abiertos (para el panel de control de turnos del admin)
+    const { data: ta } = await supabase.from("turnos_abiertos").select("*");
+    setTurnosAbiertos(ta || []);
   }, []);
+
+  // Admin fuerza el cierre de un turno atorado
+  const forzarCierreTurno = async (t) => {
+    if (!window.confirm(`¿Forzar el cierre del turno de ${t.cajera_nombre} en ${SUCURSALES[t.sucursal]?.corto}?\n\nEsto genera el corte con las ventas pendientes y libera la caja. Úsalo solo si la cajera no está disponible para hacer su propio corte.`)) return;
+    setErrorMsg("");
+    try {
+      // juntar ventas pendientes de esa sucursal
+      const { data: pend } = await supabase.from("tickets").select("*").eq("sucursal", t.sucursal).is("corte_id", null);
+      const lista = pend || [];
+      const validos = lista.filter((x) => !x.cancelado);
+      const { data: prods } = await supabase.from("productos").select("nombre,codigo,stock").eq("sucursal", t.sucursal);
+      const corte = {
+        sucursal: t.sucursal, turno: t.turno || turnoActual(), cajera: t.cajera_nombre + " (cierre forzado)",
+        total: validos.reduce((s, x) => s + Number(x.total), 0),
+        num_ventas: validos.length, cancelados: lista.length - validos.length,
+        folios: lista.map((x) => x.folio).sort((a, b) => a - b),
+        inventario: (prods || []).map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock })),
+      };
+      const { data: c, error } = await supabase.from("cortes").insert(corte).select().single();
+      if (error) throw error;
+      if (lista.length) await supabase.from("tickets").update({ corte_id: c.id }).eq("sucursal", t.sucursal).is("corte_id", null);
+      await supabase.from("turnos_abiertos").delete().eq("sucursal", t.sucursal);
+      setTurnosAbiertos((xs) => xs.filter((x) => x.sucursal !== t.sucursal));
+      setErrorMsg(`✓ Turno de ${t.cajera_nombre} cerrado. La caja de ${SUCURSALES[t.sucursal]?.corto} quedó libre.`);
+    } catch (err) {
+      setErrorMsg("No se pudo forzar el cierre: " + (err?.message || ""));
+    }
+  };
 
   useEffect(() => {
     if (!esAdmin || view !== "monitoreo") return;
@@ -604,20 +653,25 @@ export default function App() {
     const { data: pend, error } = await supabase.from("tickets").select("*")
       .eq("sucursal", sucursal).is("corte_id", null);
     if (error) { setErrorMsg("No se pudo consultar: " + error.message); return; }
-    if (!pend?.length) { setErrorMsg("No hay ventas pendientes de corte."); return; }
-    const validos = pend.filter((t) => !t.cancelado);
+    const lista = pend || [];
+    if (!lista.length && !window.confirm("No hay ventas en este turno. ¿Cerrar el turno de todas formas y liberar la caja?")) return;
+    const validos = lista.filter((t) => !t.cancelado);
     const corte = {
       sucursal, turno: turnoActual(), cajera: perfil.nombre,
       total: validos.reduce((s, t) => s + Number(t.total), 0),
       num_ventas: validos.length,
-      cancelados: pend.length - validos.length,
-      folios: pend.map((t) => t.folio).sort((a, b) => a - b),
+      cancelados: lista.length - validos.length,
+      folios: lista.map((t) => t.folio).sort((a, b) => a - b),
       inventario: products.map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock })),
     };
     const { data: c, error: e2 } = await supabase.from("cortes").insert(corte).select().single();
     if (e2) { setErrorMsg("No se pudo generar el corte: " + e2.message); return; }
-    await supabase.from("tickets").update({ corte_id: c.id }).eq("sucursal", sucursal).is("corte_id", null);
-    setTickets((ts) => ts.map((t) => (t.corte_id === null ? { ...t, corte_id: c.id } : t)));
+    if (lista.length) {
+      await supabase.from("tickets").update({ corte_id: c.id }).eq("sucursal", sucursal).is("corte_id", null);
+      setTickets((ts) => ts.map((t) => (t.corte_id === null ? { ...t, corte_id: c.id } : t)));
+    }
+    // liberar el turno abierto de esta sucursal (la caja queda libre)
+    await supabase.from("turnos_abiertos").delete().eq("sucursal", sucursal);
     setCortes((cs) => [c, ...cs]);
     setCorteVista(c);
   };
@@ -1223,6 +1277,23 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
         <div style={S.page} className="no-print">
           <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>
             Vista en vivo de ambos moteles · se actualiza cada 15 segundos · ventas de hoy ({hoyStr()})
+          </div>
+          {/* Control de turnos abiertos */}
+          <div style={{ ...S.card, marginBottom: 16 }}>
+            <div style={S.cardTitle}>🔑 Turnos abiertos</div>
+            {turnosAbiertos.length === 0 && <div style={{ fontSize: 14, color: "#8A93A3" }}>No hay turnos abiertos en este momento. Ambas cajas están libres.</div>}
+            {turnosAbiertos.map((t) => (
+              <div key={t.sucursal} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid #F2F4F8", flexWrap: "wrap", gap: 8 }}>
+                <div>
+                  <span style={{ fontWeight: 700, fontSize: 15 }}>{SUCURSALES[t.sucursal]?.corto}</span>
+                  <span style={{ color: "#8A93A3" }}> · Turno abierto por </span>
+                  <span style={{ fontWeight: 700 }}>{t.cajera_nombre}</span>
+                  <span style={{ color: "#8A93A3", fontSize: 13 }}> · desde {fechaLarga(t.abierto)}</span>
+                </div>
+                <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }}
+                  onClick={() => forzarCierreTurno(t)}>⛔ Forzar cierre</button>
+              </div>
+            ))}
           </div>
           <div style={S.repGrid}>
             {Object.entries(SUCURSALES).map(([k, s]) => {
