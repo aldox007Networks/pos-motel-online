@@ -103,6 +103,8 @@ export default function App() {
   const [catForm, setCatForm] = useState(null); // alta/edición de categoría
   const [catFiltro, setCatFiltro] = useState("todas"); // filtro activo en ventas
   const [turnosAbiertos, setTurnosAbiertos] = useState([]);
+  const [mermaModal, setMermaModal] = useState(null); // {producto?, cantidad, momento, nota}
+  const [mermasPos, setMermasPos] = useState([]);
   const [procesando, setProcesando] = useState(false);
   const [cancelarModal, setCancelarModal] = useState(null); // {ticket, motivo, nota}
   const [cancelaciones, setCancelaciones] = useState([]);
@@ -252,16 +254,18 @@ export default function App() {
   const cargarDatos = useCallback(async (suc) => {
     setCargando(true); setErrorMsg("");
     try {
-      const [p, t, c, e, cn] = await Promise.all([
+      const [p, t, c, e, cn, mp] = await Promise.all([
         supabase.from("productos").select("*").eq("sucursal", suc).order("nombre"),
         supabase.from("tickets").select("*").eq("sucursal", suc).order("fecha", { ascending: false }).limit(300),
         supabase.from("cortes").select("*").eq("sucursal", suc).order("fecha", { ascending: false }).limit(100),
         supabase.from("entradas").select("*").eq("sucursal", suc).order("fecha", { ascending: false }).limit(50),
         supabase.from("cancelaciones").select("*").eq("sucursal", suc).order("fecha", { ascending: false }).limit(100),
+        supabase.from("mermas_pos").select("*").eq("sucursal", suc).order("fecha", { ascending: false }).limit(100),
       ]);
       if (p.error || t.error || c.error || e.error) throw p.error || t.error || c.error || e.error;
       setProducts(p.data); setTickets(t.data); setCortes(c.data); setEntradas(e.data);
       if (!cn.error) setCancelaciones(cn.data);
+      if (!mp.error) setMermasPos(mp.data);
     } catch (err) {
       setErrorMsg("No se pudieron cargar los datos. Revisa tu conexión a internet. (" + (err?.message || "") + ")");
     }
@@ -585,6 +589,36 @@ export default function App() {
   };
 
   // Cambiar el método de pago de un ticket (solo si el turno sigue abierto: corte_id null)
+  // Registrar merma/daño de un producto del motel: descuenta inventario, no es venta
+  const ejecutarMerma = async () => {
+    if (procesando) return;
+    const p = mermaModal.producto;
+    const cant = parseInt(mermaModal.cantidad) || 0;
+    const momento = mermaModal.momento;
+    if (!p) { setErrorMsg("Elige el producto dañado."); return; }
+    if (!momento) { setErrorMsg("Indica cuándo ocurrió el daño."); return; }
+    if (cant <= 0) { setErrorMsg("Indica la cantidad dañada."); return; }
+    if (cant > p.stock) { setErrorMsg("No puedes mermar más de lo que hay (disponible: " + p.stock + ")."); return; }
+    setProcesando(true); setErrorMsg("");
+    try {
+      // descontar del inventario del motel
+      const { error } = await supabase.from("productos").update({ stock: p.stock - cant }).eq("id", p.id);
+      if (error) throw error;
+      // registrar la merma (auditoría)
+      const { data } = await supabase.from("mermas_pos").insert({
+        sucursal, producto_id: p.id, nombre: p.nombre, codigo: p.codigo,
+        cantidad: cant, momento, nota: (mermaModal.nota || "").trim(), usuario: perfil.nombre,
+      }).select().single();
+      setProducts((ps) => ps.map((x) => (x.id === p.id ? { ...x, stock: x.stock - cant } : x)));
+      if (data) setMermasPos((ms) => [data, ...ms]);
+      setMermaModal(null);
+      setErrorMsg(`✓ Merma registrada: ${cant} u de "${p.nombre}". Descontado del inventario.`);
+    } catch (err) {
+      setErrorMsg("No se pudo registrar la merma: " + (err?.message || ""));
+    }
+    setProcesando(false);
+  };
+
   const cambiarMetodoPago = async (ticket, metodo) => {
     if (ticket.corte_id) { setErrorMsg("Este ticket ya tiene corte; no se puede cambiar su método de pago."); return; }
     const { error } = await supabase.from("tickets").update({ metodo_pago: metodo }).eq("id", ticket.id);
@@ -1302,22 +1336,29 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>
             Vista en vivo de ambos moteles · se actualiza cada 15 segundos · ventas de hoy ({hoyStr()})
           </div>
-          {/* Control de turnos abiertos */}
+          {/* Control de turnos abiertos — ambos moteles siempre visibles */}
           <div style={{ ...S.card, marginBottom: 16 }}>
-            <div style={S.cardTitle}>🔑 Turnos abiertos</div>
-            {turnosAbiertos.length === 0 && <div style={{ fontSize: 14, color: "#8A93A3" }}>No hay turnos abiertos en este momento. Ambas cajas están libres.</div>}
-            {turnosAbiertos.map((t) => (
-              <div key={t.sucursal} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid #F2F4F8", flexWrap: "wrap", gap: 8 }}>
-                <div>
-                  <span style={{ fontWeight: 700, fontSize: 15 }}>{SUCURSALES[t.sucursal]?.corto}</span>
-                  <span style={{ color: "#8A93A3" }}> · Turno abierto por </span>
-                  <span style={{ fontWeight: 700 }}>{t.cajera_nombre}</span>
-                  <span style={{ color: "#8A93A3", fontSize: 13 }}> · desde {fechaLarga(t.abierto)}</span>
-                </div>
-                <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }}
-                  onClick={() => forzarCierreTurno(t)}>⛔ Forzar cierre</button>
-              </div>
-            ))}
+            <div style={S.cardTitle}>🔑 Estado de turnos</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
+              {Object.entries(SUCURSALES).map(([k, s]) => {
+                const t = turnosAbiertos.find((x) => x.sucursal === k);
+                return (
+                  <div key={k} style={{ border: `2px solid ${t ? "#FCA311" : "#0E9F6E"}`, borderRadius: 12, padding: "12px 14px", background: t ? "#FFFBEB" : "#F0FDF4" }}>
+                    <div style={{ fontWeight: 800, fontSize: 16, color: s.color }}>{s.nombre}</div>
+                    {t ? (
+                      <>
+                        <div style={{ fontSize: 14, marginTop: 4 }}>🔓 Turno abierto por <b>{t.cajera_nombre}</b></div>
+                        <div style={{ fontSize: 12, color: "#8A93A3" }}>Desde {fechaLarga(t.abierto)}</div>
+                        <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700, marginTop: 8 }}
+                          onClick={() => forzarCierreTurno(t)}>⛔ Forzar cierre</button>
+                      </>
+                    ) : (
+                      <div style={{ fontSize: 14, marginTop: 4, color: "#0E9F6E", fontWeight: 700 }}>✓ Caja libre (sin turno abierto)</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
           <div style={S.repGrid}>
             {Object.entries(SUCURSALES).map(([k, s]) => {
@@ -1378,6 +1419,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           </div>
           <button style={S.mostradorBtn} onClick={(e) => { e.stopPropagation(); setHabitacion("mostrador"); }}>
             🧾 Venta a Empleado / Mostrador
+          </button>
+          <button style={{ ...S.mostradorBtn, background: "#fff", color: "#E11D48", border: "2px solid #E11D48" }}
+            onClick={(e) => { e.stopPropagation(); setMermaModal({ producto: null, cantidad: "", momento: "", nota: "", busq: "" }); }}>
+            ⚠️ Reportar daño / merma de producto
           </button>
           <div style={S.habGrid}>
             {Array.from({ length: marcaActiva.habitaciones }, (_, i) => i + 1).map((n) => (
@@ -2393,6 +2438,68 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
         </div>
       )}
 
+      {/* ---------- ticket de daño / merma del motel ---------- */}
+      {mermaModal && (
+        <div style={S.overlay} className="no-print">
+          <div style={{ ...S.modal, maxWidth: 480 }}>
+            <div style={S.modalTitle}>⚠️ Reportar daño / merma</div>
+            <div style={{ fontSize: 13, color: "#8A93A3", marginBottom: 10 }}>
+              Registra un producto que se dañó al prepararse, cocinarse o en el traslado. Se descuenta del inventario y queda justificado. No es una venta.
+            </div>
+            {!mermaModal.producto ? (
+              <>
+                <label style={S.label}>Busca el producto dañado</label>
+                <input style={S.input} value={mermaModal.busq || ""} autoFocus
+                  placeholder="Nombre o código…"
+                  onChange={(e) => setMermaModal({ ...mermaModal, busq: e.target.value })} />
+                <div style={{ maxHeight: 220, overflowY: "auto", marginTop: 8 }}>
+                  {products.filter((p) => {
+                    const q = (mermaModal.busq || "").toLowerCase();
+                    return q && (p.nombre.toLowerCase().includes(q) || String(p.codigo).includes(q));
+                  }).slice(0, 12).map((p) => (
+                    <button key={p.id} style={{ ...S.dropItem, display: "flex", justifyContent: "space-between" }}
+                      onClick={() => setMermaModal({ ...mermaModal, producto: p })}>
+                      <span>{p.emoji} {p.nombre}</span>
+                      <span style={{ color: "#8A93A3" }}>stock: {p.stock}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ background: "#F7F8FA", borderRadius: 10, padding: "10px 14px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontWeight: 700 }}>{mermaModal.producto.emoji} {mermaModal.producto.nombre}</span>
+                  <button style={S.miniBtn} onClick={() => setMermaModal({ ...mermaModal, producto: null })}>Cambiar</button>
+                </div>
+                <div style={{ fontSize: 14, marginBottom: 8 }}>En inventario: <b>{mermaModal.producto.stock}</b> u</div>
+                <label style={S.label}>¿Cuándo ocurrió el daño? *</label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {[["preparacion", "🔪 Al preparar"], ["coccion", "🔥 Al cocinar"], ["traslado", "🛎️ En el traslado"], ["otro", "❓ Otro"]].map(([k, label]) => (
+                    <button key={k} style={{ ...S.methodBtn, ...(mermaModal.momento === k ? { borderColor: "#E11D48", background: "#FFF1F2", color: "#E11D48" } : {}) }}
+                      onClick={() => setMermaModal({ ...mermaModal, momento: k })}>{label}</button>
+                  ))}
+                </div>
+                <label style={S.label}>Cantidad dañada *</label>
+                <input type="number" style={S.bigInput} value={mermaModal.cantidad}
+                  onChange={(e) => setMermaModal({ ...mermaModal, cantidad: e.target.value })} />
+                <label style={S.label}>Nota (opcional)</label>
+                <input style={S.input} value={mermaModal.nota} placeholder="Detalle de lo ocurrido…"
+                  onChange={(e) => setMermaModal({ ...mermaModal, nota: e.target.value })} />
+              </>
+            )}
+            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 8 }}>La merma queda registrada con tu nombre, fecha y motivo.</div>
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setMermaModal(null)}>Cancelar</button>
+              <button style={{ ...S.deleteBtn, opacity: (mermaModal.producto && mermaModal.momento && parseInt(mermaModal.cantidad) > 0 && !procesando) ? 1 : 0.4 }}
+                disabled={!(mermaModal.producto && mermaModal.momento && parseInt(mermaModal.cantidad) > 0) || procesando}
+                onClick={ejecutarMerma}>
+                {procesando ? "Procesando…" : "⚠️ Registrar merma"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {cancelarModal && (
         <div style={S.overlay} className="no-print">
           <div style={S.modal}>
@@ -2533,6 +2640,35 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ marginTop: 10, fontSize: 14, fontWeight: 700, textAlign: "right", color: "#E11D48" }}>
                 Total cancelado: {money(cancelaciones.reduce((s, c) => s + Number(c.total || 0), 0))} · {cancelaciones.length} cancelaciones
               </div>
+            )}
+          </div>
+
+          {/* Reporte de mermas / daños del motel */}
+          <div style={{ ...S.card, marginTop: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={S.cardTitle}>⚠️ Mermas / daños — {marcaActiva.corto}</div>
+              <span style={{ fontSize: 12, color: "#8A93A3" }}>🔒 Registro permanente</span>
+            </div>
+            {mermasPos.length === 0 && <div style={S.emptyCart}>No hay mermas registradas en esta sucursal.</div>}
+            {mermasPos.length > 0 && (
+              <table style={S.table}>
+                <thead><tr><th style={S.th}>Fecha</th><th style={S.th}>Producto</th><th style={S.thC}>Cant.</th><th style={S.th}>Momento</th><th style={S.th}>Registró</th><th style={S.th}>Nota</th></tr></thead>
+                <tbody>
+                  {mermasPos.map((m) => {
+                    const momLabel = { preparacion: "🔪 Al preparar", coccion: "🔥 Al cocinar", traslado: "🛎️ En el traslado", otro: "❓ Otro" }[m.momento] || m.momento;
+                    return (
+                      <tr key={m.id}>
+                        <td style={S.td}>{fechaLarga(m.fecha)}</td>
+                        <td style={S.td}>{m.nombre}</td>
+                        <td style={{ ...S.td, textAlign: "center", fontWeight: 700, color: "#E11D48" }}>−{m.cantidad}</td>
+                        <td style={S.td}>{momLabel}</td>
+                        <td style={S.td}>{m.usuario}</td>
+                        <td style={{ ...S.td, fontSize: 13, color: "#8A93A3" }}>{m.nota}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             )}
           </div>
         </div>
