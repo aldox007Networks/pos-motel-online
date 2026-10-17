@@ -459,8 +459,10 @@ export default function App() {
         supabase.from("cortes").select("fecha,turno,cajera,total").eq("sucursal", suc).order("fecha", { ascending: false }).limit(3),
       ]);
       const validos = (t.data || []).filter((x) => !x.cancelado);
+      const porM = (m) => validos.filter((x) => (x.metodo_pago || "efectivo") === m).reduce((s, x) => s + Number(x.total), 0);
       resultado[suc] = {
         total: validos.reduce((s, x) => s + Number(x.total), 0),
+        efectivo: porM("efectivo"), transferencia: porM("transferencia"), cortesia: porM("cortesia"),
         ventas: validos.length,
         cancelados: (t.data || []).length - validos.length,
         ultimos: (t.data || []).slice(0, 8),
@@ -484,9 +486,11 @@ export default function App() {
       const lista = pend || [];
       const validos = lista.filter((x) => !x.cancelado);
       const { data: prods } = await supabase.from("productos").select("nombre,codigo,stock").eq("sucursal", t.sucursal);
+      const porMetodoF = (m) => validos.filter((x) => (x.metodo_pago || "efectivo") === m).reduce((s, x) => s + Number(x.total), 0);
       const corte = {
         sucursal: t.sucursal, turno: t.turno || turnoActual(), cajera: t.cajera_nombre + " (cierre forzado)",
         total: validos.reduce((s, x) => s + Number(x.total), 0),
+        total_efectivo: porMetodoF("efectivo"), total_transferencia: porMetodoF("transferencia"), total_cortesia: porMetodoF("cortesia"),
         num_ventas: validos.length, cancelados: lista.length - validos.length,
         folios: lista.map((x) => x.folio).sort((a, b) => a - b),
         inventario: (prods || []).map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock })),
@@ -557,6 +561,7 @@ export default function App() {
         items: cart,
         habitacion: habitacion === "mostrador" ? "Empleado/Mostrador" : `Habitación ${habitacion}`,
         total,
+        metodo_pago: "efectivo",
         cajera: perfil.nombre, turno: turnoActual(), cancelado: false, corte_id: null,
       };
       const { data, error } = await supabase.from("tickets").insert(t).select().single();
@@ -577,6 +582,14 @@ export default function App() {
       setErrorMsg("No se pudo registrar la venta: " + (err?.message || "sin conexión"));
     }
     setGuardandoVenta(false);
+  };
+
+  // Cambiar el método de pago de un ticket (solo si el turno sigue abierto: corte_id null)
+  const cambiarMetodoPago = async (ticket, metodo) => {
+    if (ticket.corte_id) { setErrorMsg("Este ticket ya tiene corte; no se puede cambiar su método de pago."); return; }
+    const { error } = await supabase.from("tickets").update({ metodo_pago: metodo }).eq("id", ticket.id);
+    if (error) { setErrorMsg("No se pudo cambiar el método: " + error.message); return; }
+    setTickets((ts) => ts.map((x) => (x.id === ticket.id ? { ...x, metodo_pago: metodo } : x)));
   };
 
   // Abre el modal de cancelación (pide motivo)
@@ -640,12 +653,16 @@ export default function App() {
   const pendientes = tickets.filter((t) => t.corte_id === null);
   const misPendientes = pendientes.filter((t) => t.cajera === perfil?.nombre);
   const misTotales = useMemo(() => {
-    let total = 0, ventas = 0, canceladas = 0;
+    let total = 0, ventas = 0, canceladas = 0, efectivo = 0, transferencia = 0, cortesia = 0;
     misPendientes.forEach((t) => {
       if (t.cancelado) { canceladas++; return; }
-      total += Number(t.total); ventas++;
+      const m = t.metodo_pago || "efectivo";
+      ventas++; total += Number(t.total);
+      if (m === "transferencia") transferencia += Number(t.total);
+      else if (m === "cortesia") cortesia += Number(t.total);
+      else efectivo += Number(t.total);
     });
-    return { total, ventas, canceladas };
+    return { total, ventas, canceladas, efectivo, transferencia, cortesia };
   }, [misPendientes]);
 
   const cerrarTurno = async () => {
@@ -656,9 +673,13 @@ export default function App() {
     const lista = pend || [];
     if (!lista.length && !window.confirm("No hay ventas en este turno. ¿Cerrar el turno de todas formas y liberar la caja?")) return;
     const validos = lista.filter((t) => !t.cancelado);
+    const porMetodo = (m) => validos.filter((t) => (t.metodo_pago || "efectivo") === m).reduce((s, t) => s + Number(t.total), 0);
     const corte = {
       sucursal, turno: turnoActual(), cajera: perfil.nombre,
       total: validos.reduce((s, t) => s + Number(t.total), 0),
+      total_efectivo: porMetodo("efectivo"),
+      total_transferencia: porMetodo("transferencia"),
+      total_cortesia: porMetodo("cortesia"),
       num_ventas: validos.length,
       cancelados: lista.length - validos.length,
       folios: lista.map((t) => t.folio).sort((a, b) => a - b),
@@ -1055,7 +1076,10 @@ export default function App() {
       { t: `${tn.nombre} (${tn.rango})`, align: "center" },
       { t: `Cajera: ${c.cajera}`, align: "center" },
       { hr: true },
-      { row: ["TOTAL EFECTIVO", money(c.total).replace("MX$", "$")], bold: true, size: 2 },
+      { row: ["EFECTIVO (en caja)", money(c.total_efectivo || 0).replace("MX$", "$")], bold: true, size: 2 },
+      { row: ["Transferencia", money(c.total_transferencia || 0).replace("MX$", "$")] },
+      { row: ["Cortesia", money(c.total_cortesia || 0).replace("MX$", "$")] },
+      { row: ["TOTAL VENDIDO", money(c.total).replace("MX$", "$")], bold: true },
       { row: ["Ventas", String(c.num_ventas)] },
       { row: ["Canceladas", String(c.cancelados)] },
       { hr: true },
@@ -1306,10 +1330,15 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                   </div>
                   {!m ? <div style={S.emptyCart}>Cargando…</div> : (
                     <>
-                      <div style={{ display: "flex", gap: 20, marginBottom: 12 }}>
-                        <div><div style={S.kpiLabel}>Efectivo hoy</div><div style={{ ...S.kpiValor, color: s.color }}>{money(m.total)}</div></div>
+                      <div style={{ display: "flex", gap: 20, marginBottom: 10 }}>
+                        <div><div style={S.kpiLabel}>Total vendido</div><div style={{ ...S.kpiValor, color: s.color }}>{money(m.total)}</div></div>
                         <div><div style={S.kpiLabel}>Ventas</div><div style={S.kpiValor}>{m.ventas}</div></div>
                         <div><div style={S.kpiLabel}>Canceladas</div><div style={S.kpiValor}>{m.cancelados}</div></div>
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 13, background: "#F0FDF4", color: "#0E9F6E", fontWeight: 700, padding: "4px 10px", borderRadius: 8 }}>💵 {money(m.efectivo || 0)}</span>
+                        <span style={{ fontSize: 13, background: "#EFF6FF", color: "#2563EB", fontWeight: 700, padding: "4px 10px", borderRadius: 8 }}>🏦 {money(m.transferencia || 0)}</span>
+                        <span style={{ fontSize: 13, background: "#FEF9C3", color: "#B8860B", fontWeight: 700, padding: "4px 10px", borderRadius: 8 }}>🎁 {money(m.cortesia || 0)}</span>
                       </div>
                       {m.bajos.length > 0 && (
                         <div style={S.alertaStock}>
@@ -1535,7 +1564,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 Cajera: {corteVista.cajera}
               </div>
               <hr style={S.hr} />
-              <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>TOTAL EFECTIVO</span><span>{money(corteVista.total)}</span></div>
+              <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>EFECTIVO (en caja)</span><span>{money(corteVista.total_efectivo || 0)}</span></div>
+              <div style={S.tkRow}><span>Transferencia</span><span>{money(corteVista.total_transferencia || 0)}</span></div>
+              <div style={S.tkRow}><span>Cortesía</span><span>{money(corteVista.total_cortesia || 0)}</span></div>
+              <div style={{ ...S.tkRow, fontWeight: 700, borderTop: "1px dashed #999", paddingTop: 4, marginTop: 4 }}><span>Total vendido</span><span>{money(corteVista.total)}</span></div>
               <div style={S.tkRow}><span>Ventas</span><span>{corteVista.num_ventas}</span></div>
               <div style={S.tkRow}><span>Canceladas</span><span>{corteVista.cancelados}</span></div>
               <div style={{ fontSize: 10, marginTop: 6 }}>Folios: {(corteVista.folios || []).map((f) => "#" + String(f).padStart(4, "0")).join(", ")}</div>
@@ -1606,42 +1638,79 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       {/* ==================== MI RESUMEN (cajera) ==================== */}
       {view === "miresumen" && !esAdmin && (
         <div style={S.page} className="no-print">
-          <div style={S.repGrid}>
-            <div style={S.card}>
-              <div style={S.cardTitle}>🧾 Mi turno en curso — {perfil.nombre}</div>
-              <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>
-                Solo se muestran tus ventas desde el último corte. Los acumulados generales los consulta el administrador.
-              </div>
-              <div style={{ ...S.corteRow, borderTop: "2px solid #14213D", fontSize: 20 }}>
-                <span>Total efectivo de mi turno</span><b>{money(misTotales.total)}</b>
-              </div>
-              <div style={{ fontSize: 13, color: "#667", marginTop: 6 }}>
-                {misTotales.ventas} venta{misTotales.ventas !== 1 && "s"} · {misTotales.canceladas} cancelada{misTotales.canceladas !== 1 && "s"}
-              </div>
-              <button style={{ ...S.payBtn, width: "100%", marginTop: 14 }} onClick={(e) => { e.stopPropagation(); cerrarTurno(); }}>
-                🗂️ Hacer corte y entregar turno
-              </button>
+          <div style={S.card}>
+            <div style={S.cardTitle}>🧾 Mi turno en curso — {perfil.nombre}</div>
+            <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>
+              Solo se muestran tus ventas desde el último corte. Los acumulados generales los consulta el administrador.
             </div>
-            <div style={S.card}>
-              <div style={S.cardTitle}>Mis tickets del turno</div>
-              {misPendientes.length === 0 && <div style={S.emptyCart}>Aún no registras ventas en este turno.</div>}
-              <table style={S.table}>
-                <tbody>
-                  {misPendientes.map((t) => (
-                    <tr key={t.id} style={{ opacity: t.cancelado ? 0.5 : 1 }}>
-                      <td style={S.td}>#{String(t.folio).padStart(4, "0")}</td>
-                      <td style={S.td}>{horaStr(t.fecha)}</td>
-                      <td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(t.total)}</td>
-                      <td style={{ ...S.td, textAlign: "center" }}>
-                        {t.cancelado
-                          ? <span style={{ ...S.stockPill, background: "#E11D48" }}>Cancelado</span>
-                          : <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }} onClick={() => cancelarTicket(t)}>🚫 Cancelar</button>}
-                      </td>
-                    </tr>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 10 }}>
+              <div style={{ background: "#F0FDF4", borderRadius: 10, padding: "12px 14px" }}>
+                <div style={{ fontSize: 12, color: "#0E9F6E", fontWeight: 700 }}>💵 EFECTIVO</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#0E9F6E" }}>{money(misTotales.efectivo)}</div>
+              </div>
+              <div style={{ background: "#EFF6FF", borderRadius: 10, padding: "12px 14px" }}>
+                <div style={{ fontSize: 12, color: "#2563EB", fontWeight: 700 }}>🏦 TRANSFERENCIA</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#2563EB" }}>{money(misTotales.transferencia)}</div>
+              </div>
+              <div style={{ background: "#FEF9C3", borderRadius: 10, padding: "12px 14px" }}>
+                <div style={{ fontSize: 12, color: "#B8860B", fontWeight: 700 }}>🎁 CORTESÍA</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#B8860B" }}>{money(misTotales.cortesia)}</div>
+              </div>
+            </div>
+            <div style={{ ...S.corteRow, borderTop: "2px solid #14213D", fontSize: 18 }}>
+              <span>Total vendido ({misTotales.ventas} venta{misTotales.ventas !== 1 && "s"}, {misTotales.canceladas} cancelada{misTotales.canceladas !== 1 && "s"})</span>
+              <b>{money(misTotales.total)}</b>
+            </div>
+            <div style={{ fontSize: 13, color: "#667", marginTop: 6 }}>
+              💵 El efectivo es lo que debes entregar en el corte. Transferencia y cortesía no son efectivo en caja.
+            </div>
+            <button style={{ ...S.payBtn, width: "100%", marginTop: 14 }} onClick={(e) => { e.stopPropagation(); cerrarTurno(); }}>
+              🗂️ Hacer corte y entregar turno
+            </button>
+          </div>
+
+          <div style={{ ...S.card, marginTop: 16 }}>
+            <div style={S.cardTitle}>Mis tickets del turno</div>
+            <div style={{ fontSize: 13, color: "#8A93A3", marginBottom: 10 }}>Toca el método de pago de cada ticket para cambiarlo (efectivo, transferencia o cortesía) según cómo pagó el huésped.</div>
+            {misPendientes.length === 0 && <div style={S.emptyCart}>Aún no registras ventas en este turno.</div>}
+            {misPendientes.map((t) => (
+              <div key={t.id} style={{ border: "1px solid #E5E8EE", borderRadius: 12, padding: 14, marginBottom: 12, opacity: t.cancelado ? 0.55 : 1 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+                  <div>
+                    <span style={{ fontWeight: 800, fontSize: 16 }}>#{String(t.folio).padStart(4, "0")}</span>
+                    <span style={{ color: "#8A93A3" }}> · {horaStr(t.fecha)}</span>
+                    {t.habitacion && <span style={{ marginLeft: 8, ...S.codePill, fontWeight: 700 }}>🚪 {t.habitacion}</span>}
+                  </div>
+                  <div style={{ fontWeight: 800, fontSize: 18 }}>{money(t.total)}</div>
+                </div>
+                {/* productos del ticket */}
+                <div style={{ marginTop: 8, fontSize: 14 }}>
+                  {(t.items || []).map((it, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", color: "#455" }}>
+                      <span>{it.cant} × {it.nombre}{it.preparado ? " 🍴" : ""}</span>
+                      <span>{money(it.precio * it.cant)}</span>
+                    </div>
                   ))}
-                </tbody>
-              </table>
-            </div>
+                </div>
+                {t.cancelado ? (
+                  <div style={{ marginTop: 10 }}><span style={{ ...S.stockPill, background: "#E11D48" }}>Cancelado</span></div>
+                ) : (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, flexWrap: "wrap", gap: 8 }}>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {[["efectivo", "💵 Efectivo"], ["transferencia", "🏦 Transferencia"], ["cortesia", "🎁 Cortesía"]].map(([k, label]) => {
+                        const activo = (t.metodo_pago || "efectivo") === k;
+                        const colores = { efectivo: "#0E9F6E", transferencia: "#2563EB", cortesia: "#B8860B" };
+                        return (
+                          <button key={k} style={{ ...S.miniBtn, fontWeight: 700, ...(activo ? { borderColor: colores[k], color: "#fff", background: colores[k] } : {}) }}
+                            onClick={() => cambiarMetodoPago(t, k)}>{label}</button>
+                        );
+                      })}
+                    </div>
+                    <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }} onClick={() => cancelarTicket(t)}>🚫 Cancelar</button>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}
