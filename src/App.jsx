@@ -101,6 +101,8 @@ export default function App() {
   const [darBaja, setDarBaja] = useState(null); // {producto, cantidad, motivo, nota} - baja del almacén
   const [bajas, setBajas] = useState([]);
   const [retornosList, setRetornosList] = useState([]);
+  const [elimAlm, setElimAlm] = useState(null); // {producto, motivo} - eliminar producto del almacén
+  const [almEliminados, setAlmEliminados] = useState([]);
   const [categorias, setCategorias] = useState([]);
   const [catForm, setCatForm] = useState(null); // alta/edición de categoría
   const [catFiltro, setCatFiltro] = useState("todas"); // filtro activo en ventas
@@ -300,17 +302,19 @@ export default function App() {
   const cargarAlmacen = useCallback(async () => {
     setErrorMsg("");
     try {
-      const [a, e, t, b, r] = await Promise.all([
+      const [a, e, t, b, r, el] = await Promise.all([
         supabase.from("almacen").select("*").order("nombre"),
         supabase.from("almacen_entradas").select("*").order("fecha", { ascending: false }).limit(30),
         supabase.from("traspasos").select("*").order("fecha", { ascending: false }).limit(30),
         supabase.from("bajas").select("*").order("fecha", { ascending: false }).limit(50),
         supabase.from("retornos").select("*").order("fecha", { ascending: false }).limit(50),
+        supabase.from("almacen_eliminados").select("*").order("fecha", { ascending: false }).limit(50),
       ]);
       if (a.error || e.error || t.error) throw a.error || e.error || t.error;
       setAlmacen(a.data); setAlmacenEntradas(e.data); setTraspasos(t.data);
       if (!b.error) setBajas(b.data);
       if (!r.error) setRetornosList(r.data);
+      if (!el.error) setAlmEliminados(el.data);
     } catch (err) {
       setErrorMsg("No se pudo cargar el almacén: " + (err?.message || ""));
     }
@@ -386,6 +390,32 @@ export default function App() {
       setErrorMsg(`✓ Baja registrada: ${cant} u de "${p.nombre}" (${motivo}).`);
     } catch (err) {
       setErrorMsg("No se pudo dar de baja: " + (err?.message || ""));
+    }
+    setProcesando(false);
+  };
+
+  // Eliminar un producto del catálogo del almacén (solo si stock = 0), con motivo y registro
+  const ejecutarElimAlm = async () => {
+    if (procesando) return;
+    const p = elimAlm.producto;
+    const motivo = (elimAlm.motivo || "").trim();
+    if (p.stock > 0) { setErrorMsg("No puedes eliminar un producto con existencias. Da de baja o traspasa primero hasta dejar el stock en 0."); return; }
+    if (!motivo) { setErrorMsg("Escribe el motivo de la eliminación."); return; }
+    setProcesando(true); setErrorMsg("");
+    try {
+      // 1) registrar la eliminación (auditoría permanente)
+      const { data: elimData } = await supabase.from("almacen_eliminados").insert({
+        nombre: p.nombre, codigo: p.codigo, motivo, usuario: perfil.nombre,
+      }).select().single();
+      // 2) borrar el producto del almacén
+      const { error } = await supabase.from("almacen").delete().eq("id", p.id);
+      if (error) throw error;
+      setAlmacen((xs) => xs.filter((x) => x.id !== p.id));
+      if (elimData) setAlmEliminados((es) => [elimData, ...es]);
+      setElimAlm(null);
+      setErrorMsg(`✓ "${p.nombre}" eliminado del almacén.`);
+    } catch (err) {
+      setErrorMsg("No se pudo eliminar: " + (err?.message || ""));
     }
     setProcesando(false);
   };
@@ -2096,7 +2126,9 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                     <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }}
                       onClick={() => setDarBaja({ producto: p, cantidad: "", motivo: "", nota: "" })}>
                       ⬇️ Baja
-                    </button>
+                    </button>{" "}
+                    <button style={S.miniBtn} title="Eliminar del catálogo (stock debe ser 0)"
+                      onClick={() => setElimAlm({ producto: p, motivo: "" })}>🗑️</button>
                   </td>
                 </tr>
               );})}
@@ -2190,6 +2222,31 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       <td style={S.td}>{SUCURSALES[r.sucursal]?.corto || r.sucursal}</td>
                       <td style={{ ...S.td, fontSize: 13 }}>{r.causa}</td>
                       <td style={S.td}>{r.usuario}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Productos eliminados del almacén */}
+          <div style={{ ...S.card, marginTop: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={S.cardTitle}>🗑️ Productos eliminados del almacén</div>
+              <span style={{ fontSize: 12, color: "#8A93A3" }}>🔒 Registro permanente</span>
+            </div>
+            {almEliminados.length === 0 && <div style={S.emptyCart}>No hay productos eliminados.</div>}
+            {almEliminados.length > 0 && (
+              <table style={S.table}>
+                <thead><tr><th style={S.th}>Fecha</th><th style={S.th}>Producto</th><th style={S.th}>Código</th><th style={S.th}>Motivo</th><th style={S.th}>Eliminó</th></tr></thead>
+                <tbody>
+                  {almEliminados.map((el) => (
+                    <tr key={el.id}>
+                      <td style={S.td}>{fechaLarga(el.fecha)}</td>
+                      <td style={S.td}>{el.nombre}</td>
+                      <td style={S.td}><span style={S.codePill}>{el.codigo}</span></td>
+                      <td style={{ ...S.td, fontSize: 13 }}>{el.motivo}</td>
+                      <td style={S.td}>{el.usuario}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2552,6 +2609,38 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       )}
 
       {/* ---------- dar de baja del almacén (merma con motivo) ---------- */}
+      {/* ---------- eliminar producto del almacén (con motivo y registro) ---------- */}
+      {elimAlm && (
+        <div style={S.overlay} className="no-print">
+          <div style={S.modal}>
+            <div style={S.modalTitle}>🗑️ Eliminar del almacén: {elimAlm.producto.nombre}</div>
+            {elimAlm.producto.stock > 0 ? (
+              <div style={{ background: "#FFF1F2", border: "1px solid #FCA5A5", color: "#B91C1C", borderRadius: 10, padding: "12px 14px", fontSize: 14, marginBottom: 10 }}>
+                ⚠ Este producto tiene <b>{elimAlm.producto.stock} unidades</b> en el almacén. No se puede eliminar con existencias.
+                Primero da de baja o traspasa hasta dejar el stock en <b>0</b>, luego podrás eliminarlo.
+              </div>
+            ) : (
+              <div style={{ fontSize: 14, marginBottom: 10 }}>
+                Se eliminará <b>{elimAlm.producto.nombre}</b> del catálogo del almacén. Su stock está en 0. Esta acción no se puede deshacer.
+              </div>
+            )}
+            <label style={S.label}>Motivo de la eliminación *</label>
+            <input style={S.input} value={elimAlm.motivo} autoFocus
+              placeholder="Ej. producto descontinuado, ya no se maneja…"
+              onChange={(e) => setElimAlm({ ...elimAlm, motivo: e.target.value })} />
+            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 8 }}>Queda registrado con tu nombre, fecha y motivo (registro permanente).</div>
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setElimAlm(null)}>Cancelar</button>
+              <button style={{ ...S.deleteBtn, opacity: (elimAlm.producto.stock === 0 && (elimAlm.motivo || "").trim() && !procesando) ? 1 : 0.4 }}
+                disabled={elimAlm.producto.stock > 0 || !(elimAlm.motivo || "").trim() || procesando}
+                onClick={ejecutarElimAlm}>
+                {procesando ? "Procesando…" : "🗑️ Eliminar producto"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {darBaja && (
         <div style={S.overlay} className="no-print">
           <div style={S.modal}>
