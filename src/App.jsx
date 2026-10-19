@@ -276,6 +276,13 @@ export default function App() {
 
   useEffect(() => { if (perfil) cargarDatos(sucursal); }, [perfil, sucursal, cargarDatos]);
 
+  // La cajera en "Mi resumen" refresca sus ventas cada 20 s (por si hubo desincronización)
+  useEffect(() => {
+    if (!perfil || esAdmin || view !== "miresumen") return;
+    const t = setInterval(() => cargarDatos(sucursal), 20000);
+    return () => clearInterval(t);
+  }, [perfil, esAdmin, view, sucursal, cargarDatos]);
+
   // categorías (compartidas entre ambos moteles)
   const cargarCategorias = useCallback(async () => {
     const { data, error } = await supabase.from("categorias").select("*").order("orden").order("nombre");
@@ -568,7 +575,7 @@ export default function App() {
         habitacion: habitacion === "mostrador" ? "Empleado/Mostrador" : `Habitación ${habitacion}`,
         total,
         metodo_pago: "efectivo",
-        cajera: perfil.nombre, turno: turnoActual(), cancelado: false, corte_id: null,
+        cajera: perfil.nombre, cajera_id: perfil.id, turno: turnoActual(), cancelado: false, corte_id: null,
       };
       const { data, error } = await supabase.from("tickets").insert(t).select().single();
       if (error) throw error;
@@ -581,7 +588,7 @@ export default function App() {
         const it = cart.find((x) => x.id === p.id);
         return it ? { ...p, stock: p.stock - it.cant } : p;
       }));
-      setTickets((ts) => [data, ...ts]);
+      setTickets((ts) => ts.some((x) => x.id === data.id) ? ts : [data, ...ts]);
       setCart([]); setConfirmVenta(false); setTicketListo(data);
       setHabitacion(null); // volver al panel de habitaciones
     } catch (err) {
@@ -687,7 +694,10 @@ export default function App() {
 
   /* ============ CORTE DE TURNO ============ */
   const pendientes = tickets.filter((t) => t.corte_id === null);
-  const misPendientes = pendientes.filter((t) => t.cajera === perfil?.nombre);
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  // Filtra por ID de cajera (confiable). Para tickets viejos sin ID, compara por nombre.
+  const misPendientes = pendientes.filter((t) =>
+    t.cajera_id ? t.cajera_id === perfil?.id : norm(t.cajera) === norm(perfil?.nombre));
   const misTotales = useMemo(() => {
     let total = 0, ventas = 0, canceladas = 0, efectivo = 0, transferencia = 0, cortesia = 0;
     misPendientes.forEach((t) => {
