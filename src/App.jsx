@@ -46,6 +46,8 @@ const money = (n) => Number(n || 0).toLocaleString("es-MX", { style: "currency",
 const hoyStr = (d = new Date()) => d.toISOString().slice(0, 10);
 const horaStr = (iso) => new Date(iso).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
 const rolLabel = (rol) => rol === "propietario" ? "Propietario" : rol === "admin" ? "Supervisor" : "Cajera";
+// Iniciales de un nombre para el ticket del huésped (no expone el nombre completo)
+const iniciales = (nombre) => String(nombre || "").trim().split(/\s+/).map((p) => p[0] || "").join("").slice(0, 3).toUpperCase() || "—";
 const fechaLarga = (iso) => new Date(iso).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" });
 
 const TURNOS = [
@@ -1085,7 +1087,7 @@ export default function App() {
       { t: suc.nombre, align: "center", bold: true, size: 2 },
       { t: `Ticket #${String(t.folio).padStart(4, "0")}`, align: "center" },
       { t: fechaLarga(t.fecha), align: "center" },
-      { t: `Atendio: ${t.cajera} - Turno ${t.turno}`, align: "center" },
+      { t: `Atendio: ${iniciales(t.cajera)} - Turno ${t.turno}`, align: "center" },
     ];
     if (t.habitacion) L.push({ t: t.habitacion, align: "center", bold: true, size: 2 });
     L.push({ hr: true });
@@ -1564,7 +1566,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ textAlign: "center", fontWeight: 800, letterSpacing: 2 }}>{SUCURSALES[ticketListo.sucursal].nombre}</div>
               <div style={{ textAlign: "center", fontSize: 11 }}>
                 Ticket #{String(ticketListo.folio).padStart(4, "0")} · {fechaLarga(ticketListo.fecha)}<br />
-                Atendió: {ticketListo.cajera} · Turno {ticketListo.turno}
+                Atendió: {iniciales(ticketListo.cajera)} · Turno {ticketListo.turno}
               </div>
               {ticketListo.habitacion && (
                 <div style={{ textAlign: "center", fontWeight: 800, fontSize: 15, marginTop: 6 }}>
