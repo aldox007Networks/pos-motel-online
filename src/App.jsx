@@ -359,7 +359,39 @@ export default function App() {
       if (error) { setErrorMsg("No se pudo guardar (¿código repetido?): " + error.message); return; }
       setAlmacen((xs) => [...xs, data].sort((a, b) => a.nombre.localeCompare(b.nombre)));
     }
+    // Sincronizar la CATEGORÍA a los productos del mismo código en AMBOS moteles
+    // (así, al clasificar en el almacén, se refleja en los inventarios sin trabajo doble)
+    if (p.categoria) {
+      const { error: eSync } = await supabase.from("productos").update({ categoria: p.categoria }).eq("codigo", p.codigo);
+      if (!eSync) {
+        setProducts((ps) => ps.map((x) => (x.codigo === p.codigo ? { ...x, categoria: p.categoria } : x)));
+      }
+    }
     setAlmForm(null);
+  };
+
+  // Sincronizar TODAS las categorías del almacén a los productos de ambos moteles (por código)
+  const sincronizarCategorias = async () => {
+    if (procesando) return;
+    if (!window.confirm("Se copiará la categoría de cada producto del almacén a los productos del mismo código en Barcelona y Amsterdam. ¿Continuar?")) return;
+    setProcesando(true); setErrorMsg("");
+    try {
+      let actualizados = 0;
+      const conCat = almacen.filter((a) => a.categoria);
+      for (const a of conCat) {
+        const { error, count } = await supabase.from("productos")
+          .update({ categoria: a.categoria }, { count: "exact" })
+          .eq("codigo", a.codigo)
+          .neq("categoria", a.categoria);
+        if (!error && count) actualizados += count;
+      }
+      // refrescar el inventario del motel que se está viendo
+      cargarDatos(sucursal);
+      setErrorMsg(`✓ Categorías sincronizadas. ${actualizados} producto(s) de los moteles quedaron clasificados según el almacén.`);
+    } catch (err) {
+      setErrorMsg("No se pudo sincronizar: " + (err?.message || ""));
+    }
+    setProcesando(false);
   };
 
   // Dar de baja del almacén: registra la merma en el reporte permanente
@@ -2086,6 +2118,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           </div>
           <div style={S.pageHead}>
             <input value={almFilter} onChange={(e) => setAlmFilter(e.target.value)} placeholder="Filtrar productos del almacén…" style={S.filterInput} />
+            <button style={{ ...S.ghostBtn, borderColor: "#14213D", color: "#14213D", fontWeight: 700 }} disabled={procesando}
+              onClick={sincronizarCategorias} title="Copiar las categorías del almacén a los productos de ambos moteles">
+              🔄 Sincronizar categorías
+            </button>
             <button style={S.payBtn} onClick={nuevoAlmProducto}>＋ Nuevo producto</button>
           </div>
           <table style={S.table}>
