@@ -106,6 +106,11 @@ export default function App() {
   const [categorias, setCategorias] = useState([]);
   const [catForm, setCatForm] = useState(null); // alta/edición de categoría
   const [catFiltro, setCatFiltro] = useState("todas"); // filtro activo en ventas
+  const [repDesde, setRepDesde] = useState(hoyStr());
+  const [repHasta, setRepHasta] = useState(hoyStr());
+  const [repTickets, setRepTickets] = useState([]); // tickets del periodo del reporte
+  const [repCargando, setRepCargando] = useState(false);
+  const [repTicketVista, setRepTicketVista] = useState(null); // ticket que se ve/imprime
   const [turnosAbiertos, setTurnosAbiertos] = useState([]);
   const [mermaModal, setMermaModal] = useState(null); // {producto?, cantidad, momento, nota}
   const [mermasPos, setMermasPos] = useState([]);
@@ -524,6 +529,68 @@ export default function App() {
   const almStockColor = (p) => (p.stock <= 0 ? "#E11D48" : p.stock <= p.stock_min ? "#D97706" : "#0E9F6E");
 
   /* ============ MONITOREO (admin, ambos moteles) ============ */
+  /* ============ REPORTES DETALLADOS ============ */
+  const cargarReporte = async () => {
+    setRepCargando(true); setErrorMsg("");
+    try {
+      const desde = repDesde + "T00:00:00";
+      const hasta = repHasta + "T23:59:59";
+      const { data, error } = await supabase.from("tickets").select("*")
+        .eq("sucursal", sucursal).gte("fecha", desde).lte("fecha", hasta)
+        .order("fecha", { ascending: true });
+      if (error) throw error;
+      setRepTickets(data || []);
+    } catch (err) {
+      setErrorMsg("No se pudo cargar el reporte: " + (err?.message || ""));
+    }
+    setRepCargando(false);
+  };
+  const atajoFecha = (tipo) => {
+    const hoy = new Date();
+    const d = (x) => x.toISOString().slice(0, 10);
+    if (tipo === "hoy") { setRepDesde(d(hoy)); setRepHasta(d(hoy)); }
+    else if (tipo === "ayer") { const a = new Date(hoy); a.setDate(a.getDate() - 1); setRepDesde(d(a)); setRepHasta(d(a)); }
+    else if (tipo === "semana") { const a = new Date(hoy); a.setDate(a.getDate() - 6); setRepDesde(d(a)); setRepHasta(d(hoy)); }
+    else if (tipo === "mes") { const a = new Date(hoy.getFullYear(), hoy.getMonth(), 1); setRepDesde(d(a)); setRepHasta(d(hoy)); }
+  };
+
+  // Cálculos del reporte (sobre los tickets cargados del periodo)
+  const repCalc = useMemo(() => {
+    const validos = repTickets.filter((t) => !t.cancelado);
+    const canceladas = repTickets.filter((t) => t.cancelado);
+    const porMetodo = (m) => validos.filter((t) => (t.metodo_pago || "efectivo") === m).reduce((s, t) => s + Number(t.total), 0);
+    // por cajera
+    const cajeras = {};
+    validos.forEach((t) => {
+      const k = t.cajera || "—";
+      if (!cajeras[k]) cajeras[k] = { nombre: k, total: 0, ventas: 0 };
+      cajeras[k].total += Number(t.total); cajeras[k].ventas++;
+    });
+    // por turno
+    const turnos = {};
+    validos.forEach((t) => {
+      const k = t.turno || 0;
+      if (!turnos[k]) turnos[k] = { turno: k, total: 0, ventas: 0 };
+      turnos[k].total += Number(t.total); turnos[k].ventas++;
+    });
+    // por producto
+    const prods = {};
+    validos.forEach((t) => (t.items || []).forEach((it) => {
+      const k = it.codigo || it.nombre;
+      if (!prods[k]) prods[k] = { nombre: it.nombre, cant: 0, importe: 0 };
+      prods[k].cant += it.cant; prods[k].importe += it.precio * it.cant;
+    }));
+    return {
+      total: validos.reduce((s, t) => s + Number(t.total), 0),
+      numVentas: validos.length,
+      numCanceladas: canceladas.length,
+      efectivo: porMetodo("efectivo"), transferencia: porMetodo("transferencia"), cortesia: porMetodo("cortesia"),
+      cajeras: Object.values(cajeras).sort((a, b) => b.total - a.total),
+      turnos: Object.values(turnos).sort((a, b) => a.turno - b.turno),
+      productos: Object.values(prods).sort((a, b) => b.importe - a.importe),
+    };
+  }, [repTickets]);
+
   const cargarMonitor = useCallback(async () => {
     const desde = hoyStr() + "T00:00:00";
     const resultado = {};
@@ -880,6 +947,20 @@ export default function App() {
       ...cortes.map((c) => [c.fecha, c.sucursal, c.turno, `"${c.cajera}"`, c.total, c.num_ventas, c.cancelados].join(",")),
     ].join("\n");
     descargar(`cortes_${sucursal}_${hoyStr()}.csv`, filas, "text/csv");
+  };
+
+  // Exportar el reporte del periodo a CSV (una fila por ticket, con sus productos)
+  const descargarReporteCSV = () => {
+    const esc = (s) => `"${String(s ?? "").replace(/"/g, '""')}"`;
+    const filas = ["Folio,Fecha,Hora,Habitacion,Cajera,Turno,Metodo,Estado,Producto,Cantidad,PrecioUnit,Importe,TotalTicket"];
+    repTickets.forEach((t) => {
+      const base = [t.folio, String(t.fecha).slice(0, 10), horaStr(t.fecha), esc(t.habitacion || ""), esc(t.cajera), t.turno, t.metodo_pago || "efectivo", t.cancelado ? "CANCELADO" : "OK"];
+      (t.items || []).forEach((it) => {
+        filas.push([...base, esc(it.nombre), it.cant, it.precio, it.precio * it.cant, t.total].join(","));
+      });
+      if (!(t.items || []).length) filas.push([...base, "", "", "", "", t.total].join(","));
+    });
+    descargar(`reporte_${sucursal}_${repDesde}_a_${repHasta}.csv`, filas.join("\n"), "text/csv");
   };
 
   /* ============ INVENTARIO ============ */
@@ -1333,7 +1414,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
   }
 
   const tabs = esAdmin
-    ? [["monitoreo", "🖥️ Monitoreo"], ["ventas", "🛒 Ventas"], ["tickets", "🧾 Tickets"], ["inventario", "📦 Inventario"], ["almacen", "🏬 Almacén"], ["reportes", "📊 Estadísticas"], ["cortes", "🗂️ Cortes"], ["usuarios", "👥 Usuarios"]]
+    ? [["monitoreo", "🖥️ Monitoreo"], ["ventas", "🛒 Ventas"], ["tickets", "🧾 Tickets"], ["inventario", "📦 Inventario"], ["almacen", "🏬 Almacén"], ["reportes", "📊 Estadísticas"], ["reportesdet", "📈 Reportes"], ["cortes", "🗂️ Cortes"], ["usuarios", "👥 Usuarios"]]
     : [["ventas", "🛒 Ventas"], ["miresumen", "🧾 Mi resumen"]];
 
   const marcaActiva = SUCURSALES[sucursal];
@@ -2713,6 +2794,171 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 onClick={ejecutarBaja}>
                 {procesando ? "Procesando…" : "⬇️ Confirmar baja"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== REPORTES DETALLADOS (admin) ==================== */}
+      {view === "reportesdet" && esAdmin && (
+        <div style={S.page}>
+          {/* Controles (no se imprimen) */}
+          <div style={{ ...S.card, marginBottom: 16 }} className="no-print">
+            <div style={S.cardTitle}>📈 Reportes de ventas — {marcaActiva.nombre}</div>
+            <div style={{ fontSize: 13, color: "#8A93A3", marginBottom: 12 }}>Elige el periodo y genera el reporte. Puedes verlo, imprimirlo o descargarlo.</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+              {[["hoy", "Hoy"], ["ayer", "Ayer"], ["semana", "Últimos 7 días"], ["mes", "Este mes"]].map(([k, label]) => (
+                <button key={k} style={S.catChip} onClick={() => atajoFecha(k)}>{label}</button>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div><label style={S.label}>Desde</label><input type="date" style={S.input} value={repDesde} onChange={(e) => setRepDesde(e.target.value)} /></div>
+              <div><label style={S.label}>Hasta</label><input type="date" style={S.input} value={repHasta} onChange={(e) => setRepHasta(e.target.value)} /></div>
+              <button style={S.payBtn} disabled={repCargando} onClick={cargarReporte}>{repCargando ? "Cargando…" : "📊 Generar reporte"}</button>
+            </div>
+            {repTickets.length > 0 && (
+              <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                <button style={S.ghostBtn} onClick={() => window.print()}>🖨️ Imprimir / Guardar PDF</button>
+                <button style={S.ghostBtn} onClick={descargarReporteCSV}>⬇ Descargar CSV (Excel)</button>
+              </div>
+            )}
+          </div>
+
+          {/* Contenido del reporte (esto SÍ se imprime) */}
+          {repTickets.length === 0 ? (
+            <div style={S.card}><div style={S.emptyCart}>Genera un reporte para ver los resultados.</div></div>
+          ) : (
+            <div id="reporte-print">
+              <div style={{ textAlign: "center", marginBottom: 16 }}>
+                <div style={{ fontSize: 22, fontWeight: 800 }}>{marcaActiva.nombre}</div>
+                <div style={{ fontSize: 15 }}>Reporte de ventas</div>
+                <div style={{ fontSize: 13, color: "#667" }}>Del {repDesde} al {repHasta}</div>
+              </div>
+
+              {/* Resumen general */}
+              <div style={{ ...S.card, marginBottom: 16 }}>
+                <div style={S.cardTitle}>Resumen del periodo</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                  <div style={{ background: "#F7F8FA", borderRadius: 10, padding: 14 }}>
+                    <div style={{ fontSize: 12, color: "#8A93A3", fontWeight: 700 }}>TOTAL VENDIDO</div>
+                    <div style={{ fontSize: 24, fontWeight: 800 }}>{money(repCalc.total)}</div>
+                  </div>
+                  <div style={{ background: "#F0FDF4", borderRadius: 10, padding: 14 }}>
+                    <div style={{ fontSize: 12, color: "#0E9F6E", fontWeight: 700 }}>💵 EFECTIVO</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: "#0E9F6E" }}>{money(repCalc.efectivo)}</div>
+                  </div>
+                  <div style={{ background: "#EFF6FF", borderRadius: 10, padding: 14 }}>
+                    <div style={{ fontSize: 12, color: "#2563EB", fontWeight: 700 }}>🏦 TRANSFERENCIA</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: "#2563EB" }}>{money(repCalc.transferencia)}</div>
+                  </div>
+                  <div style={{ background: "#FEF9C3", borderRadius: 10, padding: 14 }}>
+                    <div style={{ fontSize: 12, color: "#B8860B", fontWeight: 700 }}>🎁 CORTESÍA</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: "#B8860B" }}>{money(repCalc.cortesia)}</div>
+                  </div>
+                </div>
+                <div style={{ fontSize: 14, color: "#667", marginTop: 10 }}>
+                  {repCalc.numVentas} venta{repCalc.numVentas !== 1 && "s"} · {repCalc.numCanceladas} cancelada{repCalc.numCanceladas !== 1 && "s"}
+                </div>
+              </div>
+
+              <div style={S.repGrid2}>
+                {/* Por cajera */}
+                <div style={S.card}>
+                  <div style={S.cardTitle}>Por cajera</div>
+                  <table style={S.table}>
+                    <thead><tr><th style={S.th}>Cajera</th><th style={S.thC}>Ventas</th><th style={S.thR}>Total</th></tr></thead>
+                    <tbody>
+                      {repCalc.cajeras.map((c, i) => (
+                        <tr key={i}><td style={S.td}>{c.nombre}</td><td style={{ ...S.td, textAlign: "center" }}>{c.ventas}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(c.total)}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {/* Por turno */}
+                <div style={S.card}>
+                  <div style={S.cardTitle}>Por turno</div>
+                  <table style={S.table}>
+                    <thead><tr><th style={S.th}>Turno</th><th style={S.thC}>Ventas</th><th style={S.thR}>Total</th></tr></thead>
+                    <tbody>
+                      {repCalc.turnos.map((t, i) => {
+                        const tn = TURNOS.find((x) => x.n === t.turno);
+                        return <tr key={i}><td style={S.td}>{tn ? tn.nombre : "T" + t.turno}</td><td style={{ ...S.td, textAlign: "center" }}>{t.ventas}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(t.total)}</td></tr>;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Por producto */}
+              <div style={{ ...S.card, marginTop: 16 }}>
+                <div style={S.cardTitle}>Por producto</div>
+                <table style={S.table}>
+                  <thead><tr><th style={S.th}>Producto</th><th style={S.thC}>Unidades</th><th style={S.thR}>Importe</th></tr></thead>
+                  <tbody>
+                    {repCalc.productos.map((p, i) => (
+                      <tr key={i}><td style={S.td}>{p.nombre}</td><td style={{ ...S.td, textAlign: "center" }}>{p.cant}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(p.importe)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Detalle de tickets */}
+              <div style={{ ...S.card, marginTop: 16 }}>
+                <div style={S.cardTitle}>Detalle de tickets ({repTickets.length})</div>
+                <table style={S.table}>
+                  <thead><tr><th style={S.th}>Folio</th><th style={S.th}>Fecha/Hora</th><th style={S.th}>Habitación</th><th style={S.th}>Cajera</th><th style={S.th}>Método</th><th style={S.thR}>Total</th><th style={S.thC} className="no-print">Ver</th></tr></thead>
+                  <tbody>
+                    {repTickets.map((t) => (
+                      <tr key={t.id} style={{ opacity: t.cancelado ? 0.5 : 1 }}>
+                        <td style={S.td}>#{String(t.folio).padStart(4, "0")}</td>
+                        <td style={S.td}>{String(t.fecha).slice(0, 10)} {horaStr(t.fecha)}</td>
+                        <td style={S.td}>{t.habitacion || "—"}</td>
+                        <td style={S.td}>{t.cajera}</td>
+                        <td style={S.td}>{t.cancelado ? "CANCELADO" : (t.metodo_pago || "efectivo")}</td>
+                        <td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(t.total)}</td>
+                        <td style={{ ...S.td, textAlign: "center" }} className="no-print">
+                          <button style={S.miniBtn} onClick={() => setRepTicketVista(t)}>👁 Ver</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---------- ver / imprimir un ticket del reporte ---------- */}
+      {repTicketVista && (
+        <div style={S.overlay} onClick={(e) => e.stopPropagation()}>
+          <div style={{ ...S.modal, maxWidth: 360 }}>
+            <div id="print-area" style={S.ticket}>
+              <div style={{ textAlign: "center", fontWeight: 800, letterSpacing: 2 }}>{SUCURSALES[repTicketVista.sucursal].nombre}</div>
+              <div style={{ textAlign: "center", fontSize: 11 }}>
+                Ticket #{String(repTicketVista.folio).padStart(4, "0")} · {fechaLarga(repTicketVista.fecha)}<br />
+                Atendió: {iniciales(repTicketVista.cajera)} · Turno {repTicketVista.turno}
+              </div>
+              {repTicketVista.habitacion && (
+                <div style={{ textAlign: "center", fontWeight: 800, fontSize: 15, marginTop: 6 }}>{repTicketVista.habitacion}</div>
+              )}
+              <hr style={S.hr} />
+              {(repTicketVista.items || []).map((it, i) => (
+                <div key={i} style={S.tkRow}><span style={{ flex: 1, marginRight: 6 }}>{it.cant} × {it.nombre}</span><span style={{ whiteSpace: "nowrap" }}>{money(it.precio * it.cant)}</span></div>
+              ))}
+              <hr style={S.hr} />
+              <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>TOTAL</span><span>{money(repTicketVista.total)}</span></div>
+              <div style={{ fontSize: 11, marginTop: 4 }}>Pago: {repTicketVista.cancelado ? "CANCELADO" : (repTicketVista.metodo_pago || "efectivo")}</div>
+            </div>
+            <div style={S.modalActions} className="no-print">
+              <button style={S.ghostBtn} onClick={() => setRepTicketVista(null)}>Cerrar</button>
+              <button style={S.payBtn} onClick={async () => {
+                if (agenteOk) {
+                  try { await imprimirPorAgente(ticketALineas(repTicketVista), false); return; }
+                  catch (e) { setErrorMsg("Agente: " + e.message); }
+                }
+                imprimir();
+              }}>🖨️ Imprimir ticket</button>
             </div>
           </div>
         </div>
