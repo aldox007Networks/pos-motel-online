@@ -14,6 +14,8 @@ const SUCURSALES = {
   amsterdam: { nombre: "MOTEL AMSTERDAM", corto: "Amsterdam", color: "#B8860B", habitaciones: 17 },
 };
 const SUC_ENV = (import.meta.env.VITE_SUCURSAL || "").toLowerCase();
+// Personas autorizadas para aprobar cortesías
+const AUTORIZAN_CORTESIA = ["Paulo Parra", "Clarissa Morteo"];
 
 /* ---------- Code 39 ---------- */
 const C39 = {
@@ -117,6 +119,7 @@ export default function App() {
   const [procesando, setProcesando] = useState(false);
   const [cancelarModal, setCancelarModal] = useState(null); // {ticket, motivo, nota}
   const [cancelaciones, setCancelaciones] = useState([]);
+  const [cortesiaModal, setCortesiaModal] = useState(null); // {ticket, autoriza} - elegir quién autoriza
   const [resguardoVista, setResguardoVista] = useState(null); // nota de procedimiento para preparados cancelados
   const [almFilter, setAlmFilter] = useState("");
   const [perfiles, setPerfiles] = useState([]);
@@ -287,6 +290,14 @@ export default function App() {
   useEffect(() => {
     if (!perfil || esAdmin || view !== "miresumen") return;
     const t = setInterval(() => cargarDatos(sucursal), 20000);
+    return () => clearInterval(t);
+  }, [perfil, esAdmin, view, sucursal, cargarDatos]);
+
+  // La cajera en "Ventas" refresca productos y categorías cada 60 s
+  // (para que los cambios del admin —categorías, precios, productos nuevos— aparezcan solos)
+  useEffect(() => {
+    if (!perfil || esAdmin || view !== "ventas") return;
+    const t = setInterval(() => { cargarDatos(sucursal); cargarCategorias(); }, 60000);
     return () => clearInterval(t);
   }, [perfil, esAdmin, view, sucursal, cargarDatos]);
 
@@ -759,9 +770,23 @@ export default function App() {
 
   const cambiarMetodoPago = async (ticket, metodo) => {
     if (ticket.corte_id) { setErrorMsg("Este ticket ya tiene corte; no se puede cambiar su método de pago."); return; }
-    const { error } = await supabase.from("tickets").update({ metodo_pago: metodo }).eq("id", ticket.id);
+    // La cortesía requiere autorización: abre el modal en vez de aplicar directo
+    if (metodo === "cortesia") { setCortesiaModal({ ticket, autoriza: "" }); return; }
+    const { error } = await supabase.from("tickets").update({ metodo_pago: metodo, cortesia_autoriza: null }).eq("id", ticket.id);
     if (error) { setErrorMsg("No se pudo cambiar el método: " + error.message); return; }
-    setTickets((ts) => ts.map((x) => (x.id === ticket.id ? { ...x, metodo_pago: metodo } : x)));
+    setTickets((ts) => ts.map((x) => (x.id === ticket.id ? { ...x, metodo_pago: metodo, cortesia_autoriza: null } : x)));
+  };
+
+  // Confirmar cortesía con el autorizador elegido
+  const confirmarCortesia = async () => {
+    const ticket = cortesiaModal.ticket;
+    const autoriza = cortesiaModal.autoriza;
+    if (!autoriza) { setErrorMsg("Elige quién autoriza la cortesía."); return; }
+    const { error } = await supabase.from("tickets")
+      .update({ metodo_pago: "cortesia", cortesia_autoriza: autoriza }).eq("id", ticket.id);
+    if (error) { setErrorMsg("No se pudo guardar la cortesía: " + error.message); return; }
+    setTickets((ts) => ts.map((x) => (x.id === ticket.id ? { ...x, metodo_pago: "cortesia", cortesia_autoriza: autoriza } : x)));
+    setCortesiaModal(null);
   };
 
   // Abre el modal de cancelación (pide motivo)
@@ -952,9 +977,9 @@ export default function App() {
   // Exportar el reporte del periodo a CSV (una fila por ticket, con sus productos)
   const descargarReporteCSV = () => {
     const esc = (s) => `"${String(s ?? "").replace(/"/g, '""')}"`;
-    const filas = ["Folio,Fecha,Hora,Habitacion,Cajera,Turno,Metodo,Estado,Producto,Cantidad,PrecioUnit,Importe,TotalTicket"];
+    const filas = ["Folio,Fecha,Hora,Habitacion,Cajera,Turno,Metodo,AutorizaCortesia,Estado,Producto,Cantidad,PrecioUnit,Importe,TotalTicket"];
     repTickets.forEach((t) => {
-      const base = [t.folio, String(t.fecha).slice(0, 10), horaStr(t.fecha), esc(t.habitacion || ""), esc(t.cajera), t.turno, t.metodo_pago || "efectivo", t.cancelado ? "CANCELADO" : "OK"];
+      const base = [t.folio, String(t.fecha).slice(0, 10), horaStr(t.fecha), esc(t.habitacion || ""), esc(t.cajera), t.turno, t.metodo_pago || "efectivo", esc(t.cortesia_autoriza || ""), t.cancelado ? "CANCELADO" : "OK"];
       (t.items || []).forEach((it) => {
         filas.push([...base, esc(it.nombre), it.cant, it.precio, it.precio * it.cant, t.total].join(","));
       });
@@ -1465,6 +1490,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             ))}
           </nav>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button onClick={(e) => { e.stopPropagation(); cargarDatos(sucursal); cargarCategorias(); setErrorMsg("✓ Actualizado."); setTimeout(() => setErrorMsg(""), 1500); }}
+              style={S.actualizarBtn} title="Traer los últimos cambios (productos, categorías, precios)">
+              🔄 Actualizar
+            </button>
             <button onClick={(e) => { e.stopPropagation(); generarPreCorte(); }}
               style={S.preCorteBtn} title="Arqueo rápido sin cerrar el turno">
               🔎 Pre-corte
@@ -1908,6 +1937,9 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                     </div>
                     <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }} onClick={() => cancelarTicket(t)}>🚫 Cancelar</button>
                   </div>
+                )}
+                {!t.cancelado && t.metodo_pago === "cortesia" && t.cortesia_autoriza && (
+                  <div style={{ fontSize: 13, color: "#B8860B", marginTop: 8, fontWeight: 600 }}>🎁 Cortesía autorizada por: {t.cortesia_autoriza}</div>
                 )}
               </div>
             ))}
@@ -2686,6 +2718,35 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
         </div>
       )}
 
+      {/* ---------- autorización de cortesía ---------- */}
+      {cortesiaModal && (
+        <div style={S.overlay} className="no-print">
+          <div style={S.modal}>
+            <div style={S.modalTitle}>🎁 Cortesía — Ticket #{String(cortesiaModal.ticket.folio).padStart(4, "0")}</div>
+            <div style={{ fontSize: 14, marginBottom: 10 }}>
+              Total: <b>{money(cortesiaModal.ticket.total)}</b>. Al marcar como cortesía, este monto <b>no entra como efectivo</b>, pero queda registrado.
+            </div>
+            <label style={S.label}>¿Quién autoriza la cortesía? *</label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {AUTORIZAN_CORTESIA.map((persona) => (
+                <button key={persona} style={{ ...S.methodBtn, textAlign: "left", ...(cortesiaModal.autoriza === persona ? { borderColor: "#B8860B", background: "#FFF9EE", color: "#B8860B" } : {}) }}
+                  onClick={() => setCortesiaModal({ ...cortesiaModal, autoriza: persona })}>
+                  👤 {persona}
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 8 }}>
+              Solo estas personas pueden autorizar cortesías. Queda registrado quién autorizó, con el monto.
+            </div>
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setCortesiaModal(null)}>Cancelar</button>
+              <button style={{ ...S.payBtn, opacity: cortesiaModal.autoriza ? 1 : 0.4 }} disabled={!cortesiaModal.autoriza}
+                onClick={confirmarCortesia}>🎁 Confirmar cortesía</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {cancelarModal && (
         <div style={S.overlay} className="no-print">
           <div style={S.modal}>
@@ -3054,6 +3115,43 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </table>
             )}
           </div>
+
+          {/* Reporte de cortesías */}
+          {(() => {
+            const cortesias = tickets.filter((t) => t.metodo_pago === "cortesia" && !t.cancelado);
+            const totalCort = cortesias.reduce((s, t) => s + Number(t.total), 0);
+            return (
+              <div style={{ ...S.card, marginTop: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <div style={S.cardTitle}>🎁 Reporte de cortesías — {marcaActiva.corto}</div>
+                  <span style={{ fontSize: 12, color: "#8A93A3" }}>No suman al efectivo</span>
+                </div>
+                {cortesias.length === 0 && <div style={S.emptyCart}>No hay cortesías registradas (de las ventas cargadas).</div>}
+                {cortesias.length > 0 && (
+                  <>
+                    <table style={S.table}>
+                      <thead><tr><th style={S.th}>Folio</th><th style={S.th}>Fecha</th><th style={S.th}>Habitación</th><th style={S.th}>Autorizó</th><th style={S.th}>Cajera</th><th style={S.thR}>Monto</th></tr></thead>
+                      <tbody>
+                        {cortesias.map((t) => (
+                          <tr key={t.id}>
+                            <td style={S.td}>#{String(t.folio).padStart(4, "0")}</td>
+                            <td style={S.td}>{String(t.fecha).slice(0, 10)} {horaStr(t.fecha)}</td>
+                            <td style={S.td}>{t.habitacion || "—"}</td>
+                            <td style={{ ...S.td, fontWeight: 700, color: "#B8860B" }}>{t.cortesia_autoriza || "—"}</td>
+                            <td style={S.td}>{t.cajera}</td>
+                            <td style={{ ...S.td, textAlign: "right", fontWeight: 700, color: "#B8860B" }}>{money(t.total)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div style={{ marginTop: 10, fontSize: 14, fontWeight: 700, textAlign: "right", color: "#B8860B" }}>
+                      Total en cortesías: {money(totalCort)} · {cortesias.length} cortesía{cortesias.length !== 1 && "s"}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
       {view === "usuarios" && esAdmin && (
@@ -3206,6 +3304,7 @@ const S = {
   corteBtn: { background: "transparent", color: "#FCA311", border: "2px solid #FCA311", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 800, cursor: "pointer" },
   corteNavBtn: { background: "#FCA311", color: "#14213D", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 15, fontWeight: 800, cursor: "pointer" },
   preCorteBtn: { background: "transparent", color: "#FCA311", border: "1.5px solid #FCA311", borderRadius: 8, padding: "10px 18px", fontSize: 15, fontWeight: 700, cursor: "pointer" },
+  actualizarBtn: { background: "transparent", color: "#fff", border: "1.5px solid #3A4763", borderRadius: 8, padding: "10px 16px", fontSize: 15, fontWeight: 700, cursor: "pointer" },
   ghostBtn: { background: "#fff", color: "#455", border: "1px solid #D7DCE5", borderRadius: 10, padding: "12px 20px", fontSize: 15, cursor: "pointer" },
   deleteBtn: { background: "#FFF1F2", color: "#E11D48", border: "1px solid #FECDD3", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
 
