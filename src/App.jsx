@@ -153,6 +153,7 @@ export default function App() {
   const [resurtir, setResurtir] = useState(null);
   const [userForm, setUserForm] = useState(null);
   const [corteVista, setCorteVista] = useState(null);
+  const [cortePrevia, setCortePrevia] = useState(null); // vista previa del corte ANTES de cerrarlo
   const [preCorte, setPreCorte] = useState(null); // arqueo rápido sin cerrar turno
   const [busquedaTicket, setBusquedaTicket] = useState("");
 
@@ -914,17 +915,18 @@ export default function App() {
       .map(([nombre, total]) => ({ nombre, total }));
   };
 
+  // Paso 1: GENERAR LA VISTA PREVIA del corte (NO cierra nada, solo calcula y muestra)
   const cerrarTurno = async () => {
     setErrorMsg("");
     const { data: pend, error } = await supabase.from("tickets").select("*")
       .eq("sucursal", sucursal).is("corte_id", null);
     if (error) { setErrorMsg("No se pudo consultar: " + error.message); return; }
     const lista = pend || [];
-    if (!lista.length && !window.confirm("No hay ventas en este turno. ¿Cerrar el turno de todas formas y liberar la caja?")) return;
     const validos = lista.filter((t) => !t.cancelado);
     const porMetodo = (m) => validos.filter((t) => (t.metodo_pago || "efectivo") === m).reduce((s, t) => s + Number(t.total), 0);
+    // Objeto del corte calculado (todavía sin guardar en la base)
     const corte = {
-      sucursal, turno: turnoActual(), cajera: perfil.nombre,
+      sucursal, turno: turnoActual(), cajera: perfil.nombre, fecha: new Date().toISOString(),
       total: validos.reduce((s, t) => s + Number(t.total), 0),
       total_efectivo: porMetodo("efectivo"),
       total_transferencia: porMetodo("transferencia"),
@@ -934,17 +936,31 @@ export default function App() {
       cancelados: lista.length - validos.length,
       folios: lista.map((t) => t.folio).sort((a, b) => a - b),
       inventario: products.map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock })),
+      _sinVentas: lista.length === 0,
     };
-    const { data: c, error: e2 } = await supabase.from("cortes").insert(corte).select().single();
-    if (e2) { setErrorMsg("No se pudo generar el corte: " + e2.message); return; }
-    if (lista.length) {
-      await supabase.from("tickets").update({ corte_id: c.id }).eq("sucursal", sucursal).is("corte_id", null);
-      setTickets((ts) => ts.map((t) => (t.corte_id === null ? { ...t, corte_id: c.id } : t)));
+    setCortePrevia(corte);
+  };
+
+  // Paso 2: EJECUTAR EL CORTE de verdad (guarda, marca tickets, libera la caja)
+  const ejecutarCorte = async () => {
+    if (procesando || !cortePrevia) return;
+    setProcesando(true); setErrorMsg("");
+    try {
+      const { _sinVentas, fecha, ...corteData } = cortePrevia; // quitar campos auxiliares
+      const { data: c, error: e2 } = await supabase.from("cortes").insert(corteData).select().single();
+      if (e2) throw e2;
+      if (!_sinVentas) {
+        await supabase.from("tickets").update({ corte_id: c.id }).eq("sucursal", sucursal).is("corte_id", null);
+        setTickets((ts) => ts.map((t) => (t.corte_id === null ? { ...t, corte_id: c.id } : t)));
+      }
+      await supabase.from("turnos_abiertos").delete().eq("sucursal", sucursal);
+      setCortes((cs) => [c, ...cs]);
+      setCortePrevia(null);
+      setCorteVista(c); // ahora sí muestra el corte definitivo (imprimible)
+    } catch (err) {
+      setErrorMsg("No se pudo realizar el corte: " + (err?.message || ""));
     }
-    // liberar el turno abierto de esta sucursal (la caja queda libre)
-    await supabase.from("turnos_abiertos").delete().eq("sucursal", sucursal);
-    setCortes((cs) => [c, ...cs]);
-    setCorteVista(c);
+    setProcesando(false);
   };
 
   // Pre-corte: arqueo rápido de "cómo voy", sin cerrar el turno ni guardar nada
@@ -1837,6 +1853,93 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       )}
 
       {/* ---------- corte (vista imprimible) ---------- */}
+      {/* ---------- VISTA PREVIA del corte (AÚN NO se cierra) ---------- */}
+      {cortePrevia && (
+        <div style={S.overlay} onClick={(e) => e.stopPropagation()}>
+          <div style={{ ...S.modal, maxWidth: 380 }}>
+            {/* Aviso grande: todavía NO está cerrado */}
+            <div style={{
+              background: "#FEF3C7", border: "2px solid #F59E0B", borderRadius: 10,
+              padding: "12px 14px", marginBottom: 12, textAlign: "center",
+            }}>
+              <div style={{ fontSize: 26, lineHeight: 1 }}>⚠️</div>
+              <div style={{ fontWeight: 900, fontSize: 16, color: "#92400E", marginTop: 4 }}>
+                ESTE CORTE AÚN NO SE HA CERRADO
+              </div>
+              <div style={{ fontSize: 12, color: "#92400E", marginTop: 4 }}>
+                Es solo una vista previa. El turno sigue abierto hasta que confirmes abajo.
+              </div>
+            </div>
+
+            <div style={{ ...S.ticket, opacity: 0.97 }}>
+              <div style={{ textAlign: "center", fontWeight: 800, letterSpacing: 2 }}>{SUCURSALES[cortePrevia.sucursal].nombre}</div>
+              <div style={{ textAlign: "center", fontWeight: 700 }}>CORTE DE CAJA (EFECTIVO)</div>
+              <div style={{ textAlign: "center", fontSize: 11, fontWeight: 800, color: "#B45309" }}>— VISTA PREVIA —</div>
+              <div style={{ textAlign: "center", fontSize: 11 }}>
+                {fechaLarga(cortePrevia.fecha)}<br />
+                {(TURNOS.find((t) => t.n === cortePrevia.turno) || TURNOS[0]).nombre} ({(TURNOS.find((t) => t.n === cortePrevia.turno) || TURNOS[0]).rango})<br />
+                Cajera: {cortePrevia.cajera}
+              </div>
+              <hr style={S.hr} />
+              <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>EFECTIVO (en caja)</span><span>{money(cortePrevia.total_efectivo || 0)}</span></div>
+              <div style={S.tkRow}><span>Transferencia</span><span>{money(cortePrevia.total_transferencia || 0)}</span></div>
+              <div style={S.tkRow}><span>Cortesía</span><span>{money(cortePrevia.total_cortesia || 0)}</span></div>
+              {(cortePrevia.por_categoria || []).length > 0 && (
+                <>
+                  <hr style={S.hr} />
+                  <div style={{ textAlign: "center", fontWeight: 700, fontSize: 12 }}>VENTAS POR CATEGORÍA</div>
+                  {(cortePrevia.por_categoria || []).map((c, i) => (
+                    <div key={i} style={S.tkRow}><span>{c.nombre}</span><span><b>{money(c.total)}</b></span></div>
+                  ))}
+                </>
+              )}
+              <hr style={S.hr} />
+              <div style={{ ...S.tkRow, fontWeight: 700 }}><span>Total vendido</span><span>{money(cortePrevia.total)}</span></div>
+              <div style={S.tkRow}><span>Ventas</span><span>{cortePrevia.num_ventas}</span></div>
+              <div style={S.tkRow}><span>Canceladas</span><span>{cortePrevia.cancelados}</span></div>
+              <div style={{ fontSize: 10, marginTop: 6 }}>Folios: {(cortePrevia.folios || []).map((f) => "#" + String(f).padStart(4, "0")).join(", ")}</div>
+              <hr style={S.hr} />
+              <div style={{ textAlign: "center", fontWeight: 700, fontSize: 12 }}>INVENTARIO QUE SE ENTREGA</div>
+              {(cortePrevia.inventario || []).map((p, i) => (
+                <div key={i} style={{ ...S.tkRow, fontSize: 11 }}><span>{p.nombre}</span><span><b>{p.stock}</b> u</span></div>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }} className="no-print">
+              {/* Botón grande VERDE con doble confirmación */}
+              <button
+                disabled={procesando}
+                style={{
+                  width: "100%", padding: "16px 12px", fontSize: 18, fontWeight: 900,
+                  color: "#fff", background: procesando ? "#9CA3AF" : "#16A34A",
+                  border: "none", borderRadius: 12, cursor: procesando ? "default" : "pointer",
+                  boxShadow: "0 3px 0 rgba(0,0,0,.15)",
+                }}
+                onClick={() => {
+                  if (procesando) return;
+                  if (window.confirm("¿Estás segura? Esta acción CIERRA el turno, lo registra y libera la caja. No se puede deshacer.")) {
+                    ejecutarCorte();
+                  }
+                }}
+              >
+                {procesando ? "Realizando corte…" : "✅ Sí, realizar el corte ahora"}
+              </button>
+              <button
+                disabled={procesando}
+                style={{
+                  width: "100%", padding: "12px", fontSize: 15, fontWeight: 700,
+                  color: "#374151", background: "#F3F4F6", border: "1px solid #D1D5DB",
+                  borderRadius: 10, cursor: "pointer",
+                }}
+                onClick={() => { setCortePrevia(null); refocus(); }}
+              >
+                ← Todavía no, seguir en el turno
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {corteVista && (
         <div style={S.overlay} onClick={(e) => e.stopPropagation()}>
           <div style={{ ...S.modal, maxWidth: 360 }}>
