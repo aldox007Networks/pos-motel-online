@@ -16,6 +16,15 @@ const SUCURSALES = {
 const SUC_ENV = (import.meta.env.VITE_SUCURSAL || "").toLowerCase();
 // Personas autorizadas para aprobar cortesías
 const AUTORIZAN_CORTESIA = ["Paulo Parra", "Clarissa Morteo"];
+// Categorías principales que agrupan las subcategorías
+const CATEGORIAS_PRINCIPALES = ["Cerveza", "Sex Shop", "Venta", "Condones y Lubricantes"];
+// Mapa de respaldo subcategoría → principal (por si una categoría no tiene 'principal' en la BD)
+const PRINCIPAL_POR_SUBCAT = {
+  "Cervezas": "Cerveza", "Cerveza": "Cerveza",
+  "Sex Shop": "Sex Shop",
+  "Bebidas": "Venta", "Cuidado Personal": "Venta", "Snacks": "Venta", "Medicamentos": "Venta",
+  "Condones y Lubricantes": "Condones y Lubricantes", "Condones": "Condones y Lubricantes", "Lubricantes": "Condones y Lubricantes",
+};
 
 /* ---------- Code 39 ---------- */
 const C39 = {
@@ -638,12 +647,26 @@ export default function App() {
       const { data: pend } = await supabase.from("tickets").select("*").eq("sucursal", t.sucursal).is("corte_id", null);
       const lista = pend || [];
       const validos = lista.filter((x) => !x.cancelado);
-      const { data: prods } = await supabase.from("productos").select("nombre,codigo,stock").eq("sucursal", t.sucursal);
+      const { data: prods } = await supabase.from("productos").select("nombre,codigo,stock,categoria").eq("sucursal", t.sucursal);
       const porMetodoF = (m) => validos.filter((x) => (x.metodo_pago || "efectivo") === m).reduce((s, x) => s + Number(x.total), 0);
+      // resumen por categoría principal (solo efectivo + transferencia)
+      const prinDe = (it) => {
+        const prod = (prods || []).find((p) => p.codigo === it.codigo || p.nombre === it.nombre);
+        const subcat = prod?.categoria || null;
+        if (!subcat) return "Sin categoría";
+        const cat = categorias.find((c) => c.nombre === subcat);
+        return (cat && cat.principal) || PRINCIPAL_POR_SUBCAT[subcat] || "Sin categoría";
+      };
+      const accCat = {};
+      validos.forEach((x) => { if ((x.metodo_pago || "efectivo") === "cortesia") return;
+        (x.items || []).forEach((it) => { const pr = prinDe(it); accCat[pr] = (accCat[pr] || 0) + Number(it.precio) * Number(it.cant); }); });
+      const ordenCat = [...CATEGORIAS_PRINCIPALES, "Sin categoría"];
+      const porCategoria = Object.entries(accCat).sort((a, b) => ordenCat.indexOf(a[0]) - ordenCat.indexOf(b[0])).map(([nombre, total]) => ({ nombre, total }));
       const corte = {
         sucursal: t.sucursal, turno: t.turno || turnoActual(), cajera: t.cajera_nombre + " (cierre forzado)",
         total: validos.reduce((s, x) => s + Number(x.total), 0),
         total_efectivo: porMetodoF("efectivo"), total_transferencia: porMetodoF("transferencia"), total_cortesia: porMetodoF("cortesia"),
+        por_categoria: porCategoria,
         num_ventas: validos.length, cancelados: lista.length - validos.length,
         folios: lista.map((x) => x.folio).sort((a, b) => a - b),
         inventario: (prods || []).map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock })),
@@ -865,6 +888,32 @@ export default function App() {
     return { total, ventas, canceladas, efectivo, transferencia, cortesia };
   }, [misPendientes]);
 
+  // Resuelve la categoría PRINCIPAL de un item vendido (código → subcategoría → principal)
+  const principalDeItem = (it) => {
+    const prod = products.find((p) => p.codigo === it.codigo || p.nombre === it.nombre);
+    const subcat = prod?.categoria || null;
+    if (!subcat) return "Sin categoría";
+    const cat = categorias.find((c) => c.nombre === subcat);
+    return (cat && cat.principal) || PRINCIPAL_POR_SUBCAT[subcat] || "Sin categoría";
+  };
+
+  // Suma por categoría principal (solo efectivo + transferencia, SIN cortesías)
+  const resumenPorCategoria = (ticketsValidos) => {
+    const acc = {};
+    ticketsValidos.forEach((t) => {
+      if ((t.metodo_pago || "efectivo") === "cortesia") return; // cortesías no cuentan aquí
+      (t.items || []).forEach((it) => {
+        const pr = principalDeItem(it);
+        acc[pr] = (acc[pr] || 0) + Number(it.precio) * Number(it.cant);
+      });
+    });
+    // ordenar: las principales en el orden definido, y "Sin categoría" al final
+    const orden = [...CATEGORIAS_PRINCIPALES, "Sin categoría"];
+    return Object.entries(acc)
+      .sort((a, b) => orden.indexOf(a[0]) - orden.indexOf(b[0]))
+      .map(([nombre, total]) => ({ nombre, total }));
+  };
+
   const cerrarTurno = async () => {
     setErrorMsg("");
     const { data: pend, error } = await supabase.from("tickets").select("*")
@@ -880,6 +929,7 @@ export default function App() {
       total_efectivo: porMetodo("efectivo"),
       total_transferencia: porMetodo("transferencia"),
       total_cortesia: porMetodo("cortesia"),
+      por_categoria: resumenPorCategoria(validos),
       num_ventas: validos.length,
       cancelados: lista.length - validos.length,
       folios: lista.map((t) => t.folio).sort((a, b) => a - b),
@@ -1001,7 +1051,7 @@ export default function App() {
   const guardarCategoria = async () => {
     const nombre = (catForm.nombre || "").trim();
     if (!nombre) { setErrorMsg("Escribe el nombre de la categoría."); return; }
-    const payload = { nombre, emoji: catForm.emoji || "🏷️", orden: parseInt(catForm.orden) || 0 };
+    const payload = { nombre, emoji: catForm.emoji || "🏷️", orden: parseInt(catForm.orden) || 0, principal: catForm.principal || null };
     try {
       if (catForm.id) {
         const { data, error } = await supabase.from("categorias").update(payload).eq("id", catForm.id).select().single();
@@ -1293,12 +1343,18 @@ export default function App() {
       { row: ["EFECTIVO (en caja)", money(c.total_efectivo || 0).replace("MX$", "$")], bold: true, size: 2 },
       { row: ["Transferencia", money(c.total_transferencia || 0).replace("MX$", "$")] },
       { row: ["Cortesia", money(c.total_cortesia || 0).replace("MX$", "$")] },
-      { row: ["TOTAL VENDIDO", money(c.total).replace("MX$", "$")], bold: true },
-      { row: ["Ventas", String(c.num_ventas)] },
-      { row: ["Canceladas", String(c.cancelados)] },
-      { hr: true },
-      { t: "INVENTARIO QUE SE ENTREGA", align: "center", bold: true },
     ];
+    if ((c.por_categoria || []).length > 0) {
+      L.push({ hr: true });
+      L.push({ t: "VENTAS POR CATEGORIA", align: "center", bold: true });
+      (c.por_categoria || []).forEach((cat) => L.push({ row: [cat.nombre, money(cat.total).replace("MX$", "$")] }));
+    }
+    L.push({ hr: true });
+    L.push({ row: ["TOTAL VENDIDO", money(c.total).replace("MX$", "$")], bold: true });
+    L.push({ row: ["Ventas", String(c.num_ventas)] });
+    L.push({ row: ["Canceladas", String(c.cancelados)] });
+    L.push({ hr: true });
+    L.push({ t: "INVENTARIO QUE SE ENTREGA", align: "center", bold: true });
     (c.inventario || []).forEach((p) => L.push({ row: [p.nombre, `${p.stock} u`] }));
     L.push({ feed: 2 });
     L.push({ t: "Entrega: ______________________" });
@@ -1796,7 +1852,17 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>EFECTIVO (en caja)</span><span>{money(corteVista.total_efectivo || 0)}</span></div>
               <div style={S.tkRow}><span>Transferencia</span><span>{money(corteVista.total_transferencia || 0)}</span></div>
               <div style={S.tkRow}><span>Cortesía</span><span>{money(corteVista.total_cortesia || 0)}</span></div>
-              <div style={{ ...S.tkRow, fontWeight: 700, borderTop: "1px dashed #999", paddingTop: 4, marginTop: 4 }}><span>Total vendido</span><span>{money(corteVista.total)}</span></div>
+              {(corteVista.por_categoria || []).length > 0 && (
+                <>
+                  <hr style={S.hr} />
+                  <div style={{ textAlign: "center", fontWeight: 700, fontSize: 12 }}>VENTAS POR CATEGORÍA</div>
+                  {(corteVista.por_categoria || []).map((c, i) => (
+                    <div key={i} style={S.tkRow}><span>{c.nombre}</span><span><b>{money(c.total)}</b></span></div>
+                  ))}
+                </>
+              )}
+              <hr style={S.hr} />
+              <div style={{ ...S.tkRow, fontWeight: 700 }}><span>Total vendido</span><span>{money(corteVista.total)}</span></div>
               <div style={S.tkRow}><span>Ventas</span><span>{corteVista.num_ventas}</span></div>
               <div style={S.tkRow}><span>Canceladas</span><span>{corteVista.cancelados}</span></div>
               <div style={{ fontSize: 10, marginTop: 6 }}>Folios: {(corteVista.folios || []).map((f) => "#" + String(f).padStart(4, "0")).join(", ")}</div>
@@ -1954,7 +2020,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           <div style={{ ...S.card, marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <div style={S.cardTitle}>🏷️ Categorías de productos</div>
-              <button style={S.payBtn} onClick={() => setCatForm({ id: null, nombre: "", emoji: "🏷️", orden: "" })}>＋ Nueva categoría</button>
+              <button style={S.payBtn} onClick={() => setCatForm({ id: null, nombre: "", emoji: "🏷️", orden: "", principal: "" })}>＋ Nueva categoría</button>
             </div>
             <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>Las categorías son compartidas entre ambos moteles y organizan la pantalla de ventas.</div>
             {categorias.length === 0 && <div style={S.emptyCart}>Aún no hay categorías. Crea algunas (ej. Bebidas, Botanas, Higiene, Íntimos).</div>}
@@ -2041,6 +2107,12 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <input style={S.input} value={catForm.nombre} autoFocus
               placeholder="Ej. Bebidas, Botanas, Higiene, Íntimos…"
               onChange={(e) => setCatForm({ ...catForm, nombre: e.target.value })} />
+            <label style={S.label}>Categoría principal (para el corte)</label>
+            <select style={S.input} value={catForm.principal || ""} onChange={(e) => setCatForm({ ...catForm, principal: e.target.value })}>
+              <option value="">— Sin agrupar —</option>
+              {CATEGORIAS_PRINCIPALES.map((pr) => <option key={pr} value={pr}>{pr}</option>)}
+            </select>
+            <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 4 }}>En la venta se muestra esta subcategoría; en el corte se suma dentro de su principal.</div>
             <div style={S.formRow}>
               <div style={{ flex: 1 }}><label style={S.label}>Emoji</label>
                 <input style={S.input} value={catForm.emoji} onChange={(e) => setCatForm({ ...catForm, emoji: e.target.value })} /></div>
