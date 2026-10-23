@@ -1390,6 +1390,122 @@ export default function App() {
     if (!d.ok) throw new Error(d.error || "Error del agente");
   };
 
+  // ======= REPORTE DE INVENTARIO / ALMACÉN — hoja tamaño CARTA =======
+  // tipo: "inventario" (POS de la sucursal) | "almacen" (almacén central)
+  const reporteInventario = (tipo) => {
+    const esAlm = tipo === "almacen";
+    const titulo = esAlm ? "REPORTE DE ALMACÉN GENERAL" : `REPORTE DE INVENTARIO · ${marcaActiva.nombre}`;
+    const subtitulo = esAlm
+      ? "Almacén central único — existencias para supervisión"
+      : `Inventario del punto de venta — ${SUCURSALES[sucursal].corto}`;
+    const lista = (esAlm
+      ? almacen.filter((p) => p.nombre.toLowerCase().includes(almFilter.toLowerCase()) || p.codigo.includes(almFilter))
+      : products.filter((p) => p.nombre.toLowerCase().includes(invFilter.toLowerCase()) || p.codigo.includes(invFilter))
+    ).slice().sort((a, b) => String(a.categoria || "zzz").localeCompare(String(b.categoria || "zzz")) || a.nombre.localeCompare(b.nombre));
+
+    const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const fechaImp = new Date().toLocaleString("es-MX", { dateStyle: "full", timeStyle: "short" });
+
+    let totalU = 0, totalValor = 0, agotados = 0, bajos = 0;
+    const filas = lista.map((p, i) => {
+      const stk = Number(p.stock || 0);
+      const valorUnit = esAlm ? Number(p.precio_venta || p.costo || 0) : Number(p.precio || 0);
+      const valor = stk * valorUnit;
+      totalU += stk; totalValor += valor;
+      const alerta = stk <= 0 ? "AGOTADO" : (stk <= Number(p.stock_min || 0) ? "BAJO" : "");
+      if (stk <= 0) agotados++; else if (alerta === "BAJO") bajos++;
+      const colAlerta = stk <= 0 ? "#B91C1C" : alerta === "BAJO" ? "#B45309" : "#166534";
+      return `<tr>
+        <td class="c">${i + 1}</td>
+        <td>${esc(p.nombre)}</td>
+        <td>${esc(p.categoria || "—")}</td>
+        <td class="mono">${esc(p.codigo)}</td>
+        <td class="r b" style="color:${colAlerta}">${stk}</td>
+        <td class="c mono">${esc(p.stock_min || 0)} / ${esc(p.stock_max || "—")}</td>
+        <td class="r">${money(valorUnit)}</td>
+        <td class="r">${money(valor)}</td>
+        <td class="c b" style="color:${colAlerta}">${alerta || "✓"}</td>
+        <td class="conteo"></td>
+      </tr>`;
+    }).join("");
+
+    const marca = esAlm ? "#14213D" : marcaActiva.color;
+    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${esc(titulo)}</title>
+      <style>
+        @page { size: letter; margin: 12mm 10mm 14mm; }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; color: #111; margin: 0; font-size: 11px; }
+        .head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid ${marca}; padding-bottom: 8px; margin-bottom: 10px; }
+        .brand { font-size: 20px; font-weight: 800; color: ${marca}; letter-spacing: .5px; }
+        .brand small { display:block; font-size: 11px; font-weight: 600; color:#444; letter-spacing:0; margin-top:2px; }
+        .meta { text-align: right; font-size: 11px; color:#333; line-height: 1.5; }
+        .meta b { color:#111; }
+        .resumen { display:flex; gap:10px; margin: 0 0 10px; }
+        .chip { flex:1; border:1px solid #D7DCE5; border-radius:8px; padding:7px 10px; }
+        .chip .k { font-size:10px; color:#667; text-transform:uppercase; letter-spacing:.4px; }
+        .chip .v { font-size:16px; font-weight:800; color:#111; }
+        table { width:100%; border-collapse:collapse; }
+        thead th { background:${marca}; color:#fff; font-size:10px; text-transform:uppercase; letter-spacing:.3px; padding:6px 5px; text-align:left; }
+        tbody td { border-bottom:1px solid #E5E8EE; padding:5px 5px; vertical-align:middle; }
+        tbody tr:nth-child(even) td { background:#F7F8FA; }
+        .c { text-align:center; } .r { text-align:right; } .b { font-weight:800; }
+        .mono { font-family: ui-monospace,"Courier New",monospace; font-size:10px; }
+        .conteo { width: 60px; border-left:1px dashed #999; }
+        thead th.conteo { color:#fff; }
+        tfoot td { padding:7px 5px; font-weight:800; border-top:2px solid ${marca}; background:#F0F2F6; }
+        .firmas { display:flex; gap:40px; margin-top:34px; }
+        .firma { flex:1; text-align:center; }
+        .firma .line { border-top:1px solid #333; margin-top:40px; padding-top:5px; font-size:10px; color:#333; }
+        .pie { margin-top:10px; font-size:9px; color:#889; text-align:center; }
+        @media print { .noprint { display:none; } }
+      </style></head><body>
+      <div class="head">
+        <div class="brand">iPOS<small>${esc(subtitulo)}</small></div>
+        <div class="meta">
+          <div style="font-weight:800;font-size:13px;color:${marca}">${esc(titulo)}</div>
+          <div>Generado: <b>${esc(fechaImp)}</b></div>
+          <div>Responsable: <b>${esc(perfil?.nombre || "—")}</b> · ${esc(rolLabel(perfil?.rol))}</div>
+        </div>
+      </div>
+      <div class="resumen">
+        <div class="chip"><div class="k">Productos</div><div class="v">${lista.length}</div></div>
+        <div class="chip"><div class="k">Unidades totales</div><div class="v">${totalU}</div></div>
+        <div class="chip"><div class="k">Valor estimado</div><div class="v">${money(totalValor)}</div></div>
+        <div class="chip"><div class="k">Agotados</div><div class="v" style="color:#B91C1C">${agotados}</div></div>
+        <div class="chip"><div class="k">Stock bajo</div><div class="v" style="color:#B45309">${bajos}</div></div>
+      </div>
+      <table>
+        <thead><tr>
+          <th class="c">#</th><th>Producto</th><th>Categoría</th><th>Código</th>
+          <th class="r">Sistema</th><th class="c">Mín/Máx</th><th class="r">${esAlm ? "P. Venta" : "Precio"}</th>
+          <th class="r">Valor</th><th class="c">Estado</th><th class="c conteo">Conteo<br>físico</th>
+        </tr></thead>
+        <tbody>${filas || `<tr><td colspan="10" class="c" style="padding:20px;color:#889">Sin productos para mostrar.</td></tr>`}</tbody>
+        <tfoot><tr>
+          <td colspan="4">TOTALES</td>
+          <td class="r">${totalU} u</td><td></td><td></td>
+          <td class="r">${money(totalValor)}</td><td colspan="2"></td>
+        </tr></tfoot>
+      </table>
+      <div class="firmas">
+        <div class="firma"><div class="line">Realizó el conteo</div></div>
+        <div class="firma"><div class="line">Revisó / Supervisor</div></div>
+        <div class="firma"><div class="line">Vo.Bo.</div></div>
+      </div>
+      <div class="pie">iPOS · Aldox Networks ® — Documento de control interno. La columna "Conteo físico" es para anotar a mano las existencias verificadas.</div>
+      </body></html>`;
+
+    const iframe = document.createElement("iframe");
+    iframe.style.position = "fixed"; iframe.style.right = "0"; iframe.style.bottom = "0";
+    iframe.style.width = "0"; iframe.style.height = "0"; iframe.style.border = "0";
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow.document;
+    doc.open(); doc.write(html); doc.close();
+    const limpiar = () => setTimeout(() => { try { document.body.removeChild(iframe); } catch { /* */ } }, 1500);
+    iframe.contentWindow.onafterprint = limpiar;
+    setTimeout(() => { try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch { /* */ } limpiar(); }, 350);
+  };
+
   const imprimir = () => {
     try {
       const area = document.getElementById("print-area");
@@ -2139,6 +2255,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           </div>
           <div style={S.pageHead}>
             <input value={invFilter} onChange={(e) => setInvFilter(e.target.value)} placeholder="Filtrar productos…" style={S.filterInput} />
+            <button style={S.reporteBtn} onClick={() => reporteInventario("inventario")}
+              title="Hoja tamaño carta para supervisión — imprimir o guardar como PDF">
+              🖨️ Reporte de inventario
+            </button>
             <button style={S.payBtn} onClick={nuevoProducto}>＋ Nuevo producto</button>
           </div>
           <table style={S.table}>
@@ -2409,6 +2529,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <button style={{ ...S.ghostBtn, borderColor: "#14213D", color: "#14213D", fontWeight: 700 }} disabled={procesando}
               onClick={sincronizarCategorias} title="Copiar las categorías del almacén a los productos de ambos moteles">
               🔄 Sincronizar categorías
+            </button>
+            <button style={S.reporteBtn} onClick={() => reporteInventario("almacen")}
+              title="Hoja tamaño carta para supervisión — imprimir o guardar como PDF">
+              🖨️ Reporte de almacén
             </button>
             <button style={S.payBtn} onClick={nuevoAlmProducto}>＋ Nuevo producto</button>
           </div>
@@ -3480,6 +3604,7 @@ const S = {
   corteNavBtn: { background: "#FCA311", color: "#14213D", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 15, fontWeight: 800, cursor: "pointer" },
   preCorteBtn: { background: "transparent", color: "#FCA311", border: "1.5px solid #FCA311", borderRadius: 8, padding: "10px 18px", fontSize: 15, fontWeight: 700, cursor: "pointer" },
   actualizarBtn: { background: "transparent", color: "#fff", border: "1.5px solid #3A4763", borderRadius: 8, padding: "10px 16px", fontSize: 15, fontWeight: 700, cursor: "pointer" },
+  reporteBtn: { background: "#14213D", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 15, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
   ghostBtn: { background: "#fff", color: "#455", border: "1px solid #D7DCE5", borderRadius: 10, padding: "12px 20px", fontSize: 15, cursor: "pointer" },
   deleteBtn: { background: "#FFF1F2", color: "#E11D48", border: "1px solid #FECDD3", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
 
