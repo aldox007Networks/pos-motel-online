@@ -113,6 +113,8 @@ export default function App() {
   const [almForm, setAlmForm] = useState(null); // alta/edición de producto de almacén
   const [almResurtir, setAlmResurtir] = useState(null); // entrada de mercancía al almacén
   const [traspasar, setTraspasar] = useState(null); // {producto, cantidad, sucursal}
+  const [comprobTras, setComprobTras] = useState(null); // comprobante del último traspaso para ver/imprimir
+  const [rangoTras, setRangoTras] = useState({ desde: "", hasta: "" }); // filtro de informe general
   const [eliminarPOS, setEliminarPOS] = useState(null); // {producto, causa} - eliminar del inventario POS
   const [regresarAlm, setRegresarAlm] = useState(null); // {producto, cantidad, motivo, nota} - regresar al almacén sin eliminar
   const [darBaja, setDarBaja] = useState(null); // {producto, cantidad, motivo, nota} - baja del almacén
@@ -542,7 +544,7 @@ export default function App() {
         creado_en_pos: creado, usuario: perfil.nombre,
       }).select().single();
       setAlmacen((xs) => xs.map((x) => (x.id === p.id ? { ...x, stock: x.stock - cant } : x)));
-      if (tData) setTraspasos((ts) => [tData, ...ts]);
+      if (tData) { setTraspasos((ts) => [tData, ...ts]); setComprobTras({ ...tData, costo: p.costo, precio_venta: precioVenta }); }
       // si el destino es la sucursal que estoy viendo, recargar su inventario
       if (suc === sucursal) cargarDatos(sucursal);
       setTraspasar(null);
@@ -1399,6 +1401,192 @@ export default function App() {
 
   // ======= REPORTE DE INVENTARIO / ALMACÉN — hoja tamaño CARTA =======
   // tipo: "inventario" (POS de la sucursal) | "almacen" (almacén central)
+  // Helper común: imprime/descarga un HTML tamaño carta en un iframe oculto
+  const imprimirHTMLCarta = (html) => {
+    const iframe = document.createElement("iframe");
+    iframe.style.position = "fixed"; iframe.style.right = "0"; iframe.style.bottom = "0";
+    iframe.style.width = "0"; iframe.style.height = "0"; iframe.style.border = "0";
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow.document;
+    doc.open(); doc.write(html); doc.close();
+    const limpiar = () => setTimeout(() => { try { document.body.removeChild(iframe); } catch { /* */ } }, 1500);
+    iframe.contentWindow.onafterprint = limpiar;
+    setTimeout(() => { try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch { /* */ } limpiar(); }, 350);
+  };
+
+  const escHTML = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const folioTras = (t) => "TR-" + String(t.id || "").slice(0, 8).toUpperCase();
+
+  // ======= COMPROBANTE INDIVIDUAL de traspaso (vale de salida de almacén) =======
+  const comprobanteTraspaso = (t) => {
+    const suc = SUCURSALES[t.sucursal];
+    const marca = "#14213D";
+    const fechaImp = new Date(t.fecha || Date.now()).toLocaleString("es-MX", { dateStyle: "full", timeStyle: "short" });
+    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Vale de traspaso ${escHTML(folioTras(t))}</title>
+      <style>
+        @page { size: letter; margin: 16mm; }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system,"Segoe UI",Arial,sans-serif; color:#111; margin:0; font-size:13px; }
+        .head { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:3px solid ${marca}; padding-bottom:10px; margin-bottom:16px; }
+        .brand { font-size:24px; font-weight:800; color:${marca}; }
+        .brand small { display:block; font-size:12px; font-weight:600; color:#444; margin-top:2px; }
+        .folio { text-align:right; }
+        .folio .n { font-size:20px; font-weight:800; color:${marca}; font-family:ui-monospace,monospace; }
+        .folio .f { font-size:12px; color:#333; margin-top:4px; }
+        h1 { font-size:16px; text-align:center; letter-spacing:1px; margin:6px 0 18px; color:#111; }
+        .ruta { display:flex; align-items:center; justify-content:center; gap:16px; margin:0 0 18px; }
+        .caja { border:1.5px solid #D7DCE5; border-radius:10px; padding:12px 18px; text-align:center; min-width:150px; }
+        .caja .k { font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:#667; }
+        .caja .v { font-size:16px; font-weight:800; color:#111; margin-top:3px; }
+        .flecha { font-size:26px; color:${marca}; font-weight:800; }
+        table { width:100%; border-collapse:collapse; margin:10px 0 6px; }
+        th { background:${marca}; color:#fff; font-size:11px; text-transform:uppercase; padding:8px; text-align:left; }
+        td { border-bottom:1px solid #E5E8EE; padding:9px 8px; }
+        .r { text-align:right; } .c { text-align:center; } .b { font-weight:800; }
+        .nums { display:flex; gap:12px; margin:14px 0; }
+        .num { flex:1; border:1px solid #D7DCE5; border-radius:8px; padding:8px 10px; }
+        .num .k { font-size:10px; text-transform:uppercase; color:#667; } .num .v { font-size:17px; font-weight:800; }
+        .firmas { display:flex; gap:50px; margin-top:50px; }
+        .firma { flex:1; text-align:center; } .firma .line { border-top:1px solid #333; margin-top:46px; padding-top:6px; font-size:11px; color:#333; }
+        .pie { margin-top:22px; font-size:10px; color:#889; text-align:center; border-top:1px dashed #CCC; padding-top:10px; }
+      </style></head><body>
+      <div class="head">
+        <div class="brand">iPOS<small>Aldox Networks ® · Control de almacén</small></div>
+        <div class="folio"><div class="n">${escHTML(folioTras(t))}</div><div class="f">${escHTML(fechaImp)}</div></div>
+      </div>
+      <h1>VALE DE TRASPASO DE MERCANCÍA</h1>
+      <div class="ruta">
+        <div class="caja"><div class="k">Sale de</div><div class="v">ALMACÉN GENERAL</div></div>
+        <div class="flecha">➜</div>
+        <div class="caja"><div class="k">Entra a</div><div class="v">${escHTML(suc?.nombre || t.sucursal)}</div></div>
+      </div>
+      <table>
+        <thead><tr><th>Código</th><th>Producto</th><th class="c">Cantidad traspasada</th></tr></thead>
+        <tbody><tr>
+          <td class="b" style="font-family:ui-monospace,monospace">${escHTML(t.codigo)}</td>
+          <td class="b">${escHTML(t.nombre)}</td>
+          <td class="c b" style="font-size:18px">${escHTML(t.cantidad)} u</td>
+        </tr></tbody>
+      </table>
+      <div class="nums">
+        <div class="num"><div class="k">Stock en almacén (antes)</div><div class="v">${escHTML(t.almacen_anterior ?? "—")} u</div></div>
+        <div class="num"><div class="k">Stock en almacén (después)</div><div class="v">${escHTML(t.almacen_nuevo ?? "—")} u</div></div>
+        <div class="num"><div class="k">Autorizó / entregó</div><div class="v" style="font-size:14px">${escHTML(t.usuario || "—")}</div></div>
+      </div>
+      ${t.creado_en_pos ? `<div style="font-size:12px;color:#B45309;margin:4px 0 0">⚠ Este producto se dio de alta por primera vez en el inventario de ${escHTML(suc?.corto || t.sucursal)} con este traspaso.</div>` : ""}
+      <div class="firmas">
+        <div class="firma"><div class="line">Entregó (Almacén)</div></div>
+        <div class="firma"><div class="line">Recibió (${escHTML(suc?.corto || "Motel")})</div></div>
+      </div>
+      <div class="pie">iPOS · Documento de control interno de inventario. Folio ${escHTML(folioTras(t))} — conserve este vale para la conciliación de existencias.</div>
+      </body></html>`;
+    imprimirHTMLCarta(html);
+  };
+
+  // ======= INFORME GENERAL de traspasos por rango de fechas =======
+  const informeTraspasos = async () => {
+    setErrorMsg("");
+    const { desde, hasta } = rangoTras;
+    // traer del servidor (no solo los últimos 30 que están en memoria)
+    let q = supabase.from("traspasos").select("*").order("fecha", { ascending: true });
+    if (desde) q = q.gte("fecha", desde + "T00:00:00");
+    if (hasta) q = q.lte("fecha", hasta + "T23:59:59");
+    const { data, error } = await q;
+    if (error) { setErrorMsg("No se pudo generar el informe: " + error.message); return; }
+    const lista = data || [];
+    if (!lista.length) { setErrorMsg("No hay traspasos en el rango seleccionado."); return; }
+
+    const marca = "#14213D";
+    const rangoTxt = (desde || hasta)
+      ? `Del ${desde || "inicio"} al ${hasta || "hoy"}`
+      : "Todos los traspasos registrados";
+    // totales por motel y por producto
+    const porMotel = {}; const porProd = {};
+    lista.forEach((t) => {
+      porMotel[t.sucursal] = (porMotel[t.sucursal] || 0) + Number(t.cantidad || 0);
+      const k = t.codigo + "|" + t.nombre;
+      porProd[k] = porProd[k] || { nombre: t.nombre, codigo: t.codigo, bar: 0, ams: 0, total: 0 };
+      if (t.sucursal === "barcelona") porProd[k].bar += Number(t.cantidad || 0);
+      if (t.sucursal === "amsterdam") porProd[k].ams += Number(t.cantidad || 0);
+      porProd[k].total += Number(t.cantidad || 0);
+    });
+    const totalGeneral = lista.reduce((s, t) => s + Number(t.cantidad || 0), 0);
+
+    const filasDetalle = lista.map((t, i) => `<tr>
+      <td class="c">${i + 1}</td>
+      <td class="mono">${escHTML(folioTras(t))}</td>
+      <td>${escHTML(new Date(t.fecha).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" }))}</td>
+      <td class="mono">${escHTML(t.codigo)}</td>
+      <td>${escHTML(t.nombre)}</td>
+      <td class="c b">${escHTML(t.cantidad)}</td>
+      <td class="b">${escHTML(SUCURSALES[t.sucursal]?.corto || t.sucursal)}</td>
+      <td>${escHTML(t.usuario || "—")}</td>
+    </tr>`).join("");
+
+    const filasResumen = Object.values(porProd)
+      .sort((a, b) => b.total - a.total)
+      .map((p) => `<tr>
+        <td class="mono">${escHTML(p.codigo)}</td>
+        <td>${escHTML(p.nombre)}</td>
+        <td class="c">${p.bar || "—"}</td>
+        <td class="c">${p.ams || "—"}</td>
+        <td class="c b">${p.total}</td>
+      </tr>`).join("");
+
+    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Informe de traspasos</title>
+      <style>
+        @page { size: letter; margin: 12mm 10mm 14mm; }
+        * { box-sizing: border-box; }
+        body { font-family:-apple-system,"Segoe UI",Arial,sans-serif; color:#111; margin:0; font-size:11px; }
+        .head { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:3px solid ${marca}; padding-bottom:8px; margin-bottom:10px; }
+        .brand { font-size:20px; font-weight:800; color:${marca}; } .brand small { display:block; font-size:11px; font-weight:600; color:#444; margin-top:2px; }
+        .meta { text-align:right; font-size:11px; color:#333; line-height:1.5; }
+        .resumen { display:flex; gap:10px; margin:0 0 12px; }
+        .chip { flex:1; border:1px solid #D7DCE5; border-radius:8px; padding:7px 10px; }
+        .chip .k { font-size:10px; color:#667; text-transform:uppercase; } .chip .v { font-size:16px; font-weight:800; }
+        h2 { font-size:13px; color:${marca}; margin:16px 0 6px; border-bottom:1px solid #E5E8EE; padding-bottom:4px; }
+        table { width:100%; border-collapse:collapse; } thead th { background:${marca}; color:#fff; font-size:10px; text-transform:uppercase; padding:6px 5px; text-align:left; }
+        tbody td { border-bottom:1px solid #E5E8EE; padding:5px; } tbody tr:nth-child(even) td { background:#F7F8FA; }
+        .c { text-align:center; } .r { text-align:right; } .b { font-weight:800; } .mono { font-family:ui-monospace,monospace; font-size:10px; }
+        tfoot td { padding:7px 5px; font-weight:800; border-top:2px solid ${marca}; background:#F0F2F6; }
+        .firmas { display:flex; gap:40px; margin-top:34px; } .firma { flex:1; text-align:center; } .firma .line { border-top:1px solid #333; margin-top:40px; padding-top:5px; font-size:10px; }
+        .pie { margin-top:10px; font-size:9px; color:#889; text-align:center; }
+      </style></head><body>
+      <div class="head">
+        <div class="brand">iPOS<small>Aldox Networks ® · Control de almacén</small></div>
+        <div class="meta">
+          <div style="font-weight:800;font-size:13px;color:${marca}">INFORME DE TRASPASOS</div>
+          <div>${escHTML(rangoTxt)}</div>
+          <div>Generado: <b>${escHTML(new Date().toLocaleString("es-MX", { dateStyle: "medium", timeStyle: "short" }))}</b> · ${escHTML(perfil?.nombre || "")}</div>
+        </div>
+      </div>
+      <div class="resumen">
+        <div class="chip"><div class="k">Traspasos</div><div class="v">${lista.length}</div></div>
+        <div class="chip"><div class="k">Unidades movidas</div><div class="v">${totalGeneral}</div></div>
+        <div class="chip"><div class="k">→ Barcelona</div><div class="v">${porMotel.barcelona || 0} u</div></div>
+        <div class="chip"><div class="k">→ Amsterdam</div><div class="v">${porMotel.amsterdam || 0} u</div></div>
+      </div>
+      <h2>Resumen por producto</h2>
+      <table>
+        <thead><tr><th>Código</th><th>Producto</th><th class="c">Barcelona</th><th class="c">Amsterdam</th><th class="c">Total</th></tr></thead>
+        <tbody>${filasResumen}</tbody>
+        <tfoot><tr><td colspan="2">TOTAL GENERAL</td><td class="c">${porMotel.barcelona || 0}</td><td class="c">${porMotel.amsterdam || 0}</td><td class="c">${totalGeneral}</td></tr></tfoot>
+      </table>
+      <h2>Detalle de movimientos</h2>
+      <table>
+        <thead><tr><th class="c">#</th><th>Folio</th><th>Fecha/Hora</th><th>Código</th><th>Producto</th><th class="c">Cant.</th><th>Destino</th><th>Autorizó</th></tr></thead>
+        <tbody>${filasDetalle}</tbody>
+      </table>
+      <div class="firmas">
+        <div class="firma"><div class="line">Responsable de almacén</div></div>
+        <div class="firma"><div class="line">Revisó / Supervisor</div></div>
+        <div class="firma"><div class="line">Vo.Bo.</div></div>
+      </div>
+      <div class="pie">iPOS · Aldox Networks ® — Informe de control interno de traspasos de mercancía.</div>
+      </body></html>`;
+    imprimirHTMLCarta(html);
+  };
+
   const reporteInventario = (tipo) => {
     const esAlm = tipo === "almacen";
     const titulo = esAlm ? "REPORTE DE ALMACÉN GENERAL" : `REPORTE DE INVENTARIO · ${marcaActiva.nombre}`;
@@ -2591,6 +2779,29 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           </table>
           {almacen.length === 0 && <div style={S.emptyCart}>El almacén está vacío. Da de alta productos con "Nuevo producto".</div>}
 
+          {/* Informe general de traspasos por rango de fechas */}
+          <div style={{ ...S.card, marginTop: 16, display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 12 }}>
+            <div style={{ fontWeight: 700, color: "#14213D", fontSize: 15, marginRight: 4 }}>📄 Informe de traspasos</div>
+            <div>
+              <label style={{ ...S.label, marginBottom: 2 }}>Desde</label>
+              <input type="date" style={{ ...S.input, width: 170 }} value={rangoTras.desde}
+                onChange={(e) => setRangoTras({ ...rangoTras, desde: e.target.value })} />
+            </div>
+            <div>
+              <label style={{ ...S.label, marginBottom: 2 }}>Hasta</label>
+              <input type="date" style={{ ...S.input, width: 170 }} value={rangoTras.hasta}
+                onChange={(e) => setRangoTras({ ...rangoTras, hasta: e.target.value })} />
+            </div>
+            <button style={S.reporteBtn} onClick={informeTraspasos}
+              title="Genera el informe consolidado del rango — imprimir o guardar como PDF">
+              🖨️ Generar informe
+            </button>
+            {(rangoTras.desde || rangoTras.hasta) && (
+              <button style={S.ghostBtn} onClick={() => setRangoTras({ desde: "", hasta: "" })}>Limpiar</button>
+            )}
+            <div style={{ fontSize: 12, color: "#8A93A3", width: "100%" }}>Deja las fechas vacías para incluir todos los traspasos. El informe trae totales por motel y por producto, más el detalle de cada movimiento.</div>
+          </div>
+
           <div style={S.repGrid2}>
             <div style={{ ...S.card, marginTop: 16 }}>
               <div style={S.cardTitle}>🔀 Últimos traspasos</div>
@@ -2603,6 +2814,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       <td style={S.td}>{t.nombre}</td>
                       <td style={{ ...S.td, textAlign: "center" }}>{t.cantidad} u →</td>
                       <td style={{ ...S.td, fontWeight: 700 }}>{SUCURSALES[t.sucursal]?.corto}{t.creado_en_pos && <span style={{ ...S.internoPill, marginLeft: 4 }}>nuevo</span>}</td>
+                      <td style={{ ...S.td, textAlign: "center" }}>
+                        <button style={S.miniBtn} title="Ver / imprimir vale de este traspaso"
+                          onClick={() => comprobanteTraspaso(t)}>🖨️ Vale</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -2818,6 +3033,32 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <button style={{ ...S.payBtn, opacity: (parseInt(traspasar.cantidad) > 0 && traspasar.sucursal) ? 1 : 0.4 }}
                 disabled={!(parseInt(traspasar.cantidad) > 0 && traspasar.sucursal)} onClick={ejecutarTraspaso}>
                 🔀 Confirmar traspaso
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- comprobante tras un traspaso recién hecho ---------- */}
+      {comprobTras && (
+        <div style={S.overlay} className="no-print">
+          <div style={{ ...S.modal, maxWidth: 420, textAlign: "center" }}>
+            <div style={{ fontSize: 40 }}>✅</div>
+            <div style={S.modalTitle}>Traspaso registrado</div>
+            <div style={{ fontSize: 15, margin: "4px 0 6px" }}>
+              <b>{comprobTras.cantidad} u</b> de <b>{comprobTras.nombre}</b><br />
+              → {SUCURSALES[comprobTras.sucursal]?.nombre}
+            </div>
+            <div style={{ fontSize: 13, color: "#8A93A3", marginBottom: 10 }}>
+              Folio <b style={{ fontFamily: "monospace" }}>{folioTras(comprobTras)}</b> · Quedan {comprobTras.almacen_nuevo} u en almacén
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <button style={{ ...S.reporteBtn, width: "100%", padding: "14px", fontSize: 16 }}
+                onClick={() => comprobanteTraspaso(comprobTras)}>
+                🖨️ Imprimir vale de traspaso
+              </button>
+              <button style={{ ...S.ghostBtn, width: "100%" }} onClick={() => setComprobTras(null)}>
+                Cerrar
               </button>
             </div>
           </div>
