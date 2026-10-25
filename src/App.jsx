@@ -25,6 +25,12 @@ const PRINCIPAL_POR_SUBCAT = {
   "Bebidas": "Venta", "Cuidado Personal": "Venta", "Snacks": "Venta", "Medicamentos": "Venta",
   "Condones y Lubricantes": "Condones y Lubricantes", "Condones": "Condones y Lubricantes", "Lubricantes": "Condones y Lubricantes",
 };
+// Mapa insensible a mayúsculas/acentos/espacios (ej. "BEBIDAS" también hace match)
+const _normCat = (s) => String(s || "").trim().toUpperCase();
+const PRINCIPAL_POR_SUBCAT_NORM = Object.fromEntries(
+  Object.entries(PRINCIPAL_POR_SUBCAT).map(([k, v]) => [_normCat(k), v])
+);
+const principalDeSubcat = (subcat) => PRINCIPAL_POR_SUBCAT_NORM[_normCat(subcat)] || null;
 
 /* ---------- Code 39 ---------- */
 const C39 = {
@@ -653,10 +659,10 @@ export default function App() {
       // resumen por categoría principal (solo efectivo + transferencia)
       const prinDe = (it) => {
         const prod = (prods || []).find((p) => p.codigo === it.codigo || p.nombre === it.nombre);
-        const subcat = prod?.categoria || null;
+        const subcat = prod?.categoria || it.categoria || null;
         if (!subcat) return "Sin categoría";
-        const cat = categorias.find((c) => c.nombre === subcat);
-        return (cat && cat.principal) || PRINCIPAL_POR_SUBCAT[subcat] || "Sin categoría";
+        const cat = categorias.find((c) => _normCat(c.nombre) === _normCat(subcat));
+        return (cat && cat.principal) || principalDeSubcat(subcat) || "Sin categoría";
       };
       const accCat = {};
       validos.forEach((x) => { if ((x.metodo_pago || "efectivo") === "cortesia") return;
@@ -895,8 +901,8 @@ export default function App() {
     const prod = products.find((p) => p.codigo === it.codigo || p.nombre === it.nombre);
     const subcat = prod?.categoria || it.categoria || null;
     if (!subcat) return "Sin categoría";
-    const cat = categorias.find((c) => c.nombre === subcat);
-    return (cat && cat.principal) || PRINCIPAL_POR_SUBCAT[subcat] || "Sin categoría";
+    const cat = categorias.find((c) => _normCat(c.nombre) === _normCat(subcat));
+    return (cat && cat.principal) || principalDeSubcat(subcat) || "Sin categoría";
   };
 
   // Suma por categoría principal (solo efectivo + transferencia, SIN cortesías)
