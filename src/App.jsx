@@ -702,7 +702,7 @@ export default function App() {
     setCart((c) => {
       const i = c.findIndex((x) => x.id === p.id);
       if (i >= 0) { const n = [...c]; n[i] = { ...n[i], cant: n[i].cant + 1 }; return n; }
-      return [...c, { id: p.id, nombre: p.nombre, codigo: p.codigo, precio: Number(p.precio), cant: 1, preparado: !!p.preparado }];
+      return [...c, { id: p.id, nombre: p.nombre, codigo: p.codigo, precio: Number(p.precio), cant: 1, preparado: !!p.preparado, categoria: p.categoria || null }];
     });
     setFlash(p); setTimeout(() => setFlash(null), 1200);
   };
@@ -891,8 +891,9 @@ export default function App() {
 
   // Resuelve la categoría PRINCIPAL de un item vendido (código → subcategoría → principal)
   const principalDeItem = (it) => {
+    // 1) por el producto actual (código o nombre); 2) por la categoría que pudiera venir en el propio item
     const prod = products.find((p) => p.codigo === it.codigo || p.nombre === it.nombre);
-    const subcat = prod?.categoria || null;
+    const subcat = prod?.categoria || it.categoria || null;
     if (!subcat) return "Sin categoría";
     const cat = categorias.find((c) => c.nombre === subcat);
     return (cat && cat.principal) || PRINCIPAL_POR_SUBCAT[subcat] || "Sin categoría";
@@ -991,7 +992,7 @@ export default function App() {
       { t: "(no cierra el turno)", align: "center" },
       { t: fechaLarga(c.fecha), align: "center" },
       { t: `${tn.nombre} (${tn.rango})`, align: "center" },
-      { t: `Cajera: ${c.cajera}`, align: "center" },
+      { t: `Cajera: ${iniciales(c.cajera)}`, align: "center" },
       { hr: true },
       { row: ["EFECTIVO ESPERADO", money(c.total).replace("MX$", "$")], bold: true, size: 2 },
       { row: ["Ventas", String(c.num_ventas)] },
@@ -1016,7 +1017,7 @@ export default function App() {
       `CORTE DE CAJA (EFECTIVO)`,
       `Fecha: ${fechaLarga(c.fecha)}`,
       `${tn.nombre} (${tn.rango})`,
-      `Cajera: ${c.cajera}`,
+      `Cajera: ${iniciales(c.cajera)}`,
       `--------------------------------`,
       `TOTAL EFECTIVO: ${money(c.total)}`,
       `Ventas: ${c.num_ventas}   Canceladas: ${c.cancelados}`,
@@ -1354,7 +1355,7 @@ export default function App() {
       { t: "CORTE DE CAJA (EFECTIVO)", align: "center", bold: true },
       { t: fechaLarga(c.fecha), align: "center" },
       { t: `${tn.nombre} (${tn.rango})`, align: "center" },
-      { t: `Cajera: ${c.cajera}`, align: "center" },
+      { t: `Cajera: ${iniciales(c.cajera)}`, align: "center" },
       { hr: true },
       { row: ["EFECTIVO (en caja)", money(c.total_efectivo || 0).replace("MX$", "$")], bold: true, size: 2 },
       { row: ["Transferencia", money(c.total_transferencia || 0).replace("MX$", "$")] },
@@ -1994,7 +1995,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ textAlign: "center", fontSize: 11 }}>
                 {fechaLarga(cortePrevia.fecha)}<br />
                 {(TURNOS.find((t) => t.n === cortePrevia.turno) || TURNOS[0]).nombre} ({(TURNOS.find((t) => t.n === cortePrevia.turno) || TURNOS[0]).rango})<br />
-                Cajera: {cortePrevia.cajera}
+                Cajera: {iniciales(cortePrevia.cajera)}
               </div>
               <hr style={S.hr} />
               <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>EFECTIVO (en caja)</span><span>{money(cortePrevia.total_efectivo || 0)}</span></div>
@@ -2065,7 +2066,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ textAlign: "center", fontSize: 11 }}>
                 {fechaLarga(corteVista.fecha)}<br />
                 {(TURNOS.find((t) => t.n === corteVista.turno) || TURNOS[0]).nombre} ({(TURNOS.find((t) => t.n === corteVista.turno) || TURNOS[0]).rango})<br />
-                Cajera: {corteVista.cajera}
+                Cajera: {iniciales(corteVista.cajera)}
               </div>
               <hr style={S.hr} />
               <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>EFECTIVO (en caja)</span><span>{money(corteVista.total_efectivo || 0)}</span></div>
@@ -2120,7 +2121,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ textAlign: "center", fontSize: 11 }}>
                 {fechaLarga(preCorte.fecha)}<br />
                 {(TURNOS.find((t) => t.n === preCorte.turno) || TURNOS[0]).nombre} ({(TURNOS.find((t) => t.n === preCorte.turno) || TURNOS[0]).rango})<br />
-                Cajera: {preCorte.cajera}
+                Cajera: {iniciales(preCorte.cajera)}
               </div>
               <hr style={S.hr} />
               <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>EFECTIVO ESPERADO</span><span>{money(preCorte.total)}</span></div>
@@ -2900,7 +2901,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <hr style={S.hr} />
               <div style={{ textAlign: "center", fontSize: 11, marginBottom: 6 }}>
                 Ticket #{String(resguardoVista.folio).padStart(4, "0")} · {fechaLarga(resguardoVista.fecha)}<br />
-                Cajera: {resguardoVista.cajera}
+                Cajera: {iniciales(resguardoVista.cajera)}
               </div>
               <hr style={S.hr} />
               {resguardoVista.items.map((it, i) => (
@@ -2929,7 +2930,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       { hr: true },
                       { t: `Ticket #${String(resguardoVista.folio).padStart(4, "0")}`, align: "center" },
                       { t: fechaLarga(resguardoVista.fecha), align: "center" },
-                      { t: `Cajera: ${resguardoVista.cajera}`, align: "center" },
+                      { t: `Cajera: ${iniciales(resguardoVista.cajera)}`, align: "center" },
                       { hr: true },
                       ...resguardoVista.items.map((it) => ({ row: [`${it.cant} x ${it.nombre}`, "PREP"] })),
                       { hr: true },
