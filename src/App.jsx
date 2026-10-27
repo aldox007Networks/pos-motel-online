@@ -16,6 +16,23 @@ const SUCURSALES = {
 const SUC_ENV = (import.meta.env.VITE_SUCURSAL || "").toLowerCase();
 // Personas autorizadas para aprobar cortesías
 const AUTORIZAN_CORTESIA = ["Paulo Parra", "Clarissa Morteo"];
+// Días de la semana (0=Domingo ... 6=Sábado, igual que Date.getDay())
+const DIAS_SEMANA = [
+  { n: 1, corto: "Lun", largo: "Lunes" },
+  { n: 2, corto: "Mar", largo: "Martes" },
+  { n: 3, corto: "Mié", largo: "Miércoles" },
+  { n: 4, corto: "Jue", largo: "Jueves" },
+  { n: 5, corto: "Vie", largo: "Viernes" },
+  { n: 6, corto: "Sáb", largo: "Sábado" },
+  { n: 0, corto: "Dom", largo: "Domingo" },
+];
+const diasTexto = (dias) => {
+  const d = (dias || []).slice().sort((a, b) => a - b);
+  if (d.length === 7) return "Toda la semana";
+  if (d.length === 0) return "Ningún día";
+  const orden = [1, 2, 3, 4, 5, 6, 0];
+  return orden.filter((n) => d.includes(n)).map((n) => DIAS_SEMANA.find((x) => x.n === n)?.corto).join(", ");
+};
 // Categorías principales que agrupan las subcategorías
 const CATEGORIAS_PRINCIPALES = ["Cerveza", "Sex Shop", "Venta", "Condones y Lubricantes"];
 // Mapa de respaldo subcategoría → principal (por si una categoría no tiene 'principal' en la BD)
@@ -125,6 +142,9 @@ export default function App() {
   const [categorias, setCategorias] = useState([]);
   const [catForm, setCatForm] = useState(null); // alta/edición de categoría
   const [catFiltro, setCatFiltro] = useState("todas"); // filtro activo en ventas
+  const [combos, setCombos] = useState([]); // paquetes/combos de la sucursal
+  const [comboForm, setComboForm] = useState(null); // alta/edición de combo
+  const [combosAplicados, setCombosAplicados] = useState([]); // combos confirmados en el carrito actual
   const [repDesde, setRepDesde] = useState(hoyStr());
   const [repHasta, setRepHasta] = useState(hoyStr());
   const [repTickets, setRepTickets] = useState([]); // tickets del periodo del reporte
@@ -325,6 +345,12 @@ export default function App() {
     if (!error) setCategorias(data || []);
   }, []);
   useEffect(() => { if (perfil) cargarCategorias(); }, [perfil, cargarCategorias]);
+
+  const cargarCombos = useCallback(async (suc) => {
+    const { data, error } = await supabase.from("combos").select("*").eq("sucursal", suc).order("nombre");
+    if (!error) setCombos(data || []);
+  }, []);
+  useEffect(() => { if (perfil) cargarCombos(sucursal); }, [perfil, sucursal, cargarCombos]);
 
   const cargarPerfiles = useCallback(async () => {
     const { data } = await supabase.from("perfiles").select("*").order("nombre");
@@ -716,7 +742,71 @@ export default function App() {
   };
   const setCant = (id, cant) =>
     setCart((c) => (cant <= 0 ? c.filter((x) => x.id !== id) : c.map((x) => (x.id === id ? { ...x, cant } : x))));
-  const total = cart.reduce((s, x) => s + x.precio * x.cant, 0);
+
+  // ¿cuántas veces cabe el combo en el carrito? (según sus items y cantidades)
+  const vecesEnCarrito = (combo) => {
+    const its = combo.items || [];
+    if (!its.length) return 0;
+    let veces = Infinity;
+    for (const ci of its) {
+      const enCarro = cart.find((x) => x.id === ci.producto_id || x.codigo === ci.codigo);
+      const disp = enCarro ? enCarro.cant : 0;
+      veces = Math.min(veces, Math.floor(disp / Number(ci.cant || 1)));
+    }
+    return Number.isFinite(veces) ? veces : 0;
+  };
+
+  // combos válidos HOY y que caben al menos una vez en el carrito actual
+  const combosDisponibles = useMemo(() => {
+    const hoy = new Date().getDay(); // 0=Dom ... 6=Sáb
+    return (combos || [])
+      .filter((c) => c.activo && (c.dias || []).includes(hoy))
+      .map((c) => ({ ...c, veces: vecesEnCarrito(c) }))
+      .filter((c) => c.veces > 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [combos, cart]);
+
+  // precio normal (suma de todos los items sin combos)
+  const totalNormal = cart.reduce((s, x) => s + x.precio * x.cant, 0);
+
+  // descuento total de los combos que la cajera CONFIRMÓ aplicar
+  const descuentoCombos = useMemo(() => {
+    let desc = 0;
+    for (const ap of combosAplicados) {
+      const combo = combos.find((c) => c.id === ap.id);
+      if (!combo) continue;
+      const veces = Math.min(ap.veces || 1, vecesEnCarrito(combo));
+      if (veces <= 0) continue;
+      const precioNormalDelCombo = (combo.items || []).reduce((s, ci) => {
+        const enCarro = cart.find((x) => x.id === ci.producto_id || x.codigo === ci.codigo);
+        const precioU = enCarro ? enCarro.precio : 0;
+        return s + precioU * Number(ci.cant || 1);
+      }, 0);
+      desc += (precioNormalDelCombo - Number(combo.precio)) * veces;
+    }
+    return desc > 0 ? desc : 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [combosAplicados, combos, cart]);
+
+  const total = Math.max(0, totalNormal - descuentoCombos);
+
+  // limpiar combos aplicados que ya no caben (si la cajera quitó productos)
+  useEffect(() => {
+    setCombosAplicados((prev) => prev.filter((ap) => {
+      const combo = combos.find((c) => c.id === ap.id);
+      return combo && vecesEnCarrito(combo) > 0;
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cart, combos]);
+
+  const aplicarCombo = (combo) => {
+    const veces = vecesEnCarrito(combo);
+    if (veces <= 0) return;
+    setCombosAplicados((prev) => prev.some((a) => a.id === combo.id)
+      ? prev.map((a) => (a.id === combo.id ? { ...a, veces } : a))
+      : [...prev, { id: combo.id, nombre: combo.nombre, veces }]);
+  };
+  const quitarCombo = (id) => setCombosAplicados((prev) => prev.filter((a) => a.id !== id));
 
   const matches = useMemo(() => {
     const q = scan.trim().toLowerCase();
@@ -741,12 +831,19 @@ export default function App() {
       const { data: ult } = await supabase.from("tickets").select("folio")
         .eq("sucursal", sucursal).order("folio", { ascending: false }).limit(1);
       const folio = (ult?.[0]?.folio || 0) + 1;
+      // detalle de combos aplicados (para el ticket y reportes)
+      const combosDetalle = combosAplicados.map((ap) => {
+        const combo = combos.find((c) => c.id === ap.id);
+        const veces = combo ? Math.min(ap.veces || 1, vecesEnCarrito(combo)) : 0;
+        return combo ? { nombre: combo.nombre, precio: Number(combo.precio), veces } : null;
+      }).filter(Boolean).filter((c) => c.veces > 0);
       const t = {
         sucursal, folio,
         items: cart,
         habitacion: habitacion === "mostrador" ? "Empleado/Mostrador" : `Habitación ${habitacion}`,
         total,
         metodo_pago: "efectivo",
+        combos_aplicados: combosDetalle.length ? combosDetalle : null,
         cajera: perfil.nombre, cajera_id: perfil.id, turno: turnoActual(), cancelado: false, corte_id: null,
       };
       const { data, error } = await supabase.from("tickets").insert(t).select().single();
@@ -761,7 +858,7 @@ export default function App() {
         return it ? { ...p, stock: p.stock - it.cant } : p;
       }));
       setTickets((ts) => ts.some((x) => x.id === data.id) ? ts : [data, ...ts]);
-      setCart([]); setConfirmVenta(false); setTicketListo(data);
+      setCart([]); setConfirmVenta(false); setTicketListo(data); setCombosAplicados([]);
       setHabitacion(null); // volver al panel de habitaciones
     } catch (err) {
       setErrorMsg("No se pudo registrar la venta: " + (err?.message || "sin conexión"));
@@ -1100,6 +1197,62 @@ export default function App() {
     setCategorias((xs) => xs.filter((x) => x.id !== cat.id));
   };
 
+  /* ============ COMBOS / PAQUETES ============ */
+  const nuevoCombo = () => setComboForm({
+    id: null, nombre: "", emoji: "🎁", precio: "",
+    dias: [1, 2, 3, 4, 5, 6, 0], activo: true, items: [],
+  });
+  const editarCombo = (c) => setComboForm({
+    ...c, precio: String(c.precio ?? ""), dias: c.dias || [], items: (c.items || []).map((i) => ({ ...i })),
+  });
+  const guardarCombo = async () => {
+    if (!comboForm.nombre.trim()) { setErrorMsg("Ponle un nombre al combo."); return; }
+    if (!(comboForm.items || []).length) { setErrorMsg("Agrega al menos un producto al combo."); return; }
+    if (!(parseFloat(comboForm.precio) >= 0)) { setErrorMsg("Indica el precio del combo."); return; }
+    if (!(comboForm.dias || []).length) { setErrorMsg("Elige al menos un día de validez."); return; }
+    const payload = {
+      sucursal, nombre: comboForm.nombre.trim(), emoji: comboForm.emoji || "🎁",
+      precio: parseFloat(comboForm.precio) || 0, dias: comboForm.dias, activo: !!comboForm.activo,
+      items: comboForm.items.map((i) => ({ producto_id: i.producto_id, codigo: i.codigo, nombre: i.nombre, cant: Number(i.cant) || 1 })),
+    };
+    try {
+      if (comboForm.id) {
+        const { data, error } = await supabase.from("combos").update(payload).eq("id", comboForm.id).select().single();
+        if (error) throw error;
+        setCombos((xs) => xs.map((x) => (x.id === data.id ? data : x)));
+      } else {
+        const { data, error } = await supabase.from("combos").insert(payload).select().single();
+        if (error) throw error;
+        setCombos((xs) => [...xs, data]);
+      }
+      setComboForm(null);
+    } catch (err) { setErrorMsg("No se pudo guardar el combo: " + (err?.message || "")); }
+  };
+  const eliminarCombo = async (c) => {
+    if (!window.confirm(`¿Eliminar el combo "${c.nombre}"?`)) return;
+    const { error } = await supabase.from("combos").delete().eq("id", c.id);
+    if (error) { setErrorMsg("No se pudo eliminar: " + error.message); return; }
+    setCombos((xs) => xs.filter((x) => x.id !== c.id));
+  };
+  // añadir/quitar producto al combo que se está editando
+  const addItemCombo = (prod) => {
+    setComboForm((f) => {
+      if (f.items.some((i) => i.producto_id === prod.id)) return f;
+      return { ...f, items: [...f.items, { producto_id: prod.id, codigo: prod.codigo, nombre: prod.nombre, cant: 1 }] };
+    });
+  };
+  const setItemCombo = (producto_id, cant) => setComboForm((f) => ({
+    ...f, items: cant <= 0 ? f.items.filter((i) => i.producto_id !== producto_id) : f.items.map((i) => (i.producto_id === producto_id ? { ...i, cant } : i)),
+  }));
+  const toggleDiaCombo = (n) => setComboForm((f) => ({
+    ...f, dias: f.dias.includes(n) ? f.dias.filter((d) => d !== n) : [...f.dias, n],
+  }));
+  // precio normal del combo que se edita (para mostrar el ahorro al crearlo)
+  const precioNormalComboForm = (comboForm?.items || []).reduce((s, i) => {
+    const p = products.find((x) => x.id === i.producto_id);
+    return s + (p ? Number(p.precio) * (Number(i.cant) || 1) : 0);
+  }, 0);
+
   const guardarProducto = async () => {
     if (!form.nombre || !form.precio) return;
     let codigo = form.codigo.trim(), interno = form.interno;
@@ -1347,6 +1500,11 @@ export default function App() {
     (t.items || []).forEach((it) =>
       L.push({ row: [`${it.cant} x ${it.nombre}${it.preparado ? " *" : ""}`, money(it.precio * it.cant).replace("MX$", "$")] }));
     if ((t.items || []).some((it) => it.preparado)) L.push({ t: "* = preparado en sitio" });
+    if ((t.combos_aplicados || []).length > 0) {
+      L.push({ hr: true });
+      (t.combos_aplicados || []).forEach((c) =>
+        L.push({ t: `COMBO: ${c.nombre}${c.veces > 1 ? " x" + c.veces : ""}`, align: "center" }));
+    }
     L.push({ hr: true });
     L.push({ row: ["TOTAL", money(t.total).replace("MX$", "$")], bold: true, size: 2 });
     L.push({ feed: 1 });
@@ -2064,8 +2222,37 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               )}
             </div>
 
+            {/* Combos detectados en el carrito (día válido) */}
+            {combosDisponibles.map((c) => {
+              const aplicado = combosAplicados.some((a) => a.id === c.id);
+              return (
+                <div key={c.id} style={{ ...S.comboAlert, ...(aplicado ? S.comboAlertOn : {}) }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 800, fontSize: 15 }}>
+                      {c.emoji} {c.nombre} {c.veces > 1 && <span style={{ fontWeight: 600 }}>×{c.veces}</span>}
+                    </div>
+                    <div style={{ fontSize: 12, color: aplicado ? "#0E7A4F" : "#8A6D00" }}>
+                      {aplicado ? "✓ Aplicado" : "Disponible hoy"} · precio combo {money(c.precio)}{c.veces > 1 ? " c/u" : ""}
+                    </div>
+                  </div>
+                  {aplicado
+                    ? <button style={S.comboQuitBtn} onClick={(e) => { e.stopPropagation(); quitarCombo(c.id); }}>Quitar</button>
+                    : <button style={S.comboAddBtn} onClick={(e) => { e.stopPropagation(); aplicarCombo(c); }}>Aplicar combo</button>}
+                </div>
+              );
+            })}
+
             <div style={S.totalBar}>
-              <div><div style={S.totalLabel}>TOTAL (EFECTIVO)</div><div style={S.totalAmt}>{money(total)}</div></div>
+              <div>
+                <div style={S.totalLabel}>TOTAL (EFECTIVO)</div>
+                {descuentoCombos > 0 && (
+                  <div style={{ fontSize: 13, color: "#8A93A3", textDecoration: "line-through" }}>{money(totalNormal)}</div>
+                )}
+                <div style={S.totalAmt}>{money(total)}</div>
+                {descuentoCombos > 0 && (
+                  <div style={{ fontSize: 13, color: "#0E9F6E", fontWeight: 700 }}>Ahorro en combos: {money(descuentoCombos)}</div>
+                )}
+              </div>
               <div style={{ display: "flex", gap: 10 }}>
                 <button style={{ ...S.payBtn, padding: "16px 44px", fontSize: 20, opacity: cart.length ? 1 : 0.4 }} disabled={!cart.length}
                   onClick={(e) => { e.stopPropagation(); setConfirmVenta(true); }}>
@@ -2144,6 +2331,14 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               ))}
               {(ticketListo.items || []).some((it) => it.preparado) && (
                 <div style={{ fontSize: 10, color: "#555", marginTop: 4 }}>🍴 = preparado en sitio</div>
+              )}
+              {(ticketListo.combos_aplicados || []).length > 0 && (
+                <>
+                  <hr style={S.hr} />
+                  {(ticketListo.combos_aplicados || []).map((c, i) => (
+                    <div key={i} style={{ ...S.tkRow, fontSize: 12 }}><span style={{ flex: 1 }}>🎁 {c.nombre}{c.veces > 1 ? ` ×${c.veces}` : ""}</span><span>combo</span></div>
+                  ))}
+                </>
               )}
               <hr style={S.hr} />
               <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>TOTAL</span><span>{money(ticketListo.total)}</span></div>
@@ -2448,6 +2643,38 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               ))}
             </div>
           </div>
+
+          {/* Combos / paquetes (por sucursal) */}
+          <div style={{ ...S.card, marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={S.cardTitle}>🎁 Combos y paquetes — {marcaActiva.corto}</div>
+              <button style={S.payBtn} onClick={nuevoCombo}>＋ Nuevo combo</button>
+            </div>
+            <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>
+              Los combos son por sucursal. En caja se detectan solos cuando el carrito contiene sus productos en un día válido, y la cajera confirma con un clic.
+            </div>
+            {combos.length === 0 && <div style={S.emptyCart}>Aún no hay combos en {marcaActiva.corto}. Crea uno (ej. Six Pack, Dedos + 2 cervezas).</div>}
+            {combos.map((c) => (
+              <div key={c.id} style={{ border: "1px solid #E5E8EE", borderRadius: 12, padding: 14, marginBottom: 10, opacity: c.activo ? 1 : 0.55 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontWeight: 800, fontSize: 16 }}>{c.emoji} {c.nombre} {!c.activo && <span style={S.internoPill}>inactivo</span>}</div>
+                    <div style={{ fontSize: 13, color: "#455", marginTop: 4 }}>
+                      {(c.items || []).map((it, i) => <span key={i}>{i > 0 ? " + " : ""}{it.cant}× {it.nombre}</span>)}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 4 }}>
+                      Días: {diasTexto(c.dias)} · Precio combo: <b style={{ color: "#14213D" }}>{money(c.precio)}</b>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button style={S.miniBtn} onClick={() => editarCombo(c)}>✏️ Editar</button>
+                    <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48" }} onClick={() => eliminarCombo(c)}>🗑️</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
           <div style={S.pageHead}>
             <input value={invFilter} onChange={(e) => setInvFilter(e.target.value)} placeholder="Filtrar productos…" style={S.filterInput} />
             <button style={S.reporteBtn} onClick={() => reporteInventario("inventario")}
@@ -2541,6 +2768,85 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <div style={S.modalActions}>
               <button style={S.ghostBtn} onClick={() => setCatForm(null)}>Cancelar</button>
               <button style={S.payBtn} onClick={guardarCategoria}>💾 Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- alta/edición de COMBO ---------- */}
+      {comboForm && (
+        <div style={S.overlay} className="no-print">
+          <div style={{ ...S.modal, maxWidth: 560 }}>
+            <div style={S.modalTitle}>{comboForm.id ? "Editar combo" : "Nuevo combo"} — {marcaActiva.corto}</div>
+            <div style={S.formRow}>
+              <div style={{ flex: 3 }}><label style={S.label}>Nombre del combo *</label>
+                <input style={S.input} value={comboForm.nombre} autoFocus placeholder="Ej. Six Pack de Cerveza"
+                  onChange={(e) => setComboForm({ ...comboForm, nombre: e.target.value })} /></div>
+              <div style={{ flex: 1 }}><label style={S.label}>Emoji</label>
+                <input style={S.input} value={comboForm.emoji} onChange={(e) => setComboForm({ ...comboForm, emoji: e.target.value })} /></div>
+            </div>
+
+            <label style={S.label}>Productos que forman el combo *</label>
+            <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 6 }}>Agrega los productos y la cantidad exacta de cada uno (ej. 6× Cerveza Corona; o Dedos de queso + 2× Cerveza).</div>
+            {(comboForm.items || []).length > 0 && (
+              <div style={{ border: "1px solid #E5E8EE", borderRadius: 10, padding: 8, marginBottom: 8 }}>
+                {comboForm.items.map((i) => (
+                  <div key={i.producto_id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
+                    <span style={{ flex: 1, fontWeight: 600 }}>{i.nombre}</span>
+                    <button style={S.qtyBtn} onClick={() => setItemCombo(i.producto_id, (Number(i.cant) || 1) - 1)}>−</button>
+                    <span style={S.qty}>{i.cant}</span>
+                    <button style={S.qtyBtn} onClick={() => setItemCombo(i.producto_id, (Number(i.cant) || 1) + 1)}>+</button>
+                    <button style={S.delBtn} onClick={() => setItemCombo(i.producto_id, 0)}>✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <select style={S.input} value="" onChange={(e) => { const p = products.find((x) => x.id === e.target.value); if (p) addItemCombo(p); }}>
+              <option value="">＋ Agregar producto al combo…</option>
+              {products.filter((p) => !(comboForm.items || []).some((i) => i.producto_id === p.id))
+                .map((p) => <option key={p.id} value={p.id}>{p.nombre} — {money(p.precio)}</option>)}
+            </select>
+
+            <div style={S.formRow}>
+              <div style={{ flex: 1 }}>
+                <label style={S.label}>Precio del combo *</label>
+                <input type="number" style={S.bigInput} value={comboForm.precio} placeholder="0"
+                  onChange={(e) => setComboForm({ ...comboForm, precio: e.target.value })} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={S.label}>Precio normal (suma)</label>
+                <div style={{ ...S.bigInput, display: "flex", alignItems: "center", background: "#F7F8FA", color: "#455" }}>{money(precioNormalComboForm)}</div>
+              </div>
+            </div>
+            {parseFloat(comboForm.precio) > 0 && precioNormalComboForm > 0 && (
+              <div style={{ fontSize: 13, fontWeight: 700, color: precioNormalComboForm - parseFloat(comboForm.precio) >= 0 ? "#0E9F6E" : "#E11D48", marginTop: 2 }}>
+                {precioNormalComboForm - parseFloat(comboForm.precio) >= 0
+                  ? `Ahorro para el cliente: ${money(precioNormalComboForm - parseFloat(comboForm.precio))}`
+                  : `⚠ El combo cuesta MÁS que por separado`}
+              </div>
+            )}
+
+            <label style={{ ...S.label, marginTop: 10 }}>Días en que aplica *</label>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {DIAS_SEMANA.map((d) => (
+                <button key={d.n} type="button"
+                  style={{ ...S.methodBtn, padding: "8px 12px", ...(comboForm.dias.includes(d.n) ? S.methodOn : {}) }}
+                  onClick={() => toggleDiaCombo(d.n)}>{d.corto}</button>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <button type="button" style={S.linkBtn} onClick={() => setComboForm({ ...comboForm, dias: [1, 2, 3, 4, 5, 6, 0] })}>Toda la semana</button>
+              <button type="button" style={S.linkBtn} onClick={() => setComboForm({ ...comboForm, dias: [5, 6, 0] })}>Fin de semana</button>
+            </div>
+
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, fontSize: 15 }}>
+              <input type="checkbox" checked={!!comboForm.activo} onChange={(e) => setComboForm({ ...comboForm, activo: e.target.checked })} />
+              Combo activo (disponible en caja)
+            </label>
+
+            <div style={S.modalActions}>
+              <button style={S.ghostBtn} onClick={() => setComboForm(null)}>Cancelar</button>
+              <button style={S.payBtn} onClick={guardarCombo}>💾 Guardar combo</button>
             </div>
           </div>
         </div>
@@ -3853,6 +4159,10 @@ const S = {
   preCorteBtn: { background: "transparent", color: "#FCA311", border: "1.5px solid #FCA311", borderRadius: 8, padding: "10px 18px", fontSize: 15, fontWeight: 700, cursor: "pointer" },
   actualizarBtn: { background: "transparent", color: "#fff", border: "1.5px solid #3A4763", borderRadius: 8, padding: "10px 16px", fontSize: 15, fontWeight: 700, cursor: "pointer" },
   reporteBtn: { background: "#14213D", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 15, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
+  comboAlert: { display: "flex", alignItems: "center", gap: 10, background: "#FFFBEB", border: "1.5px solid #FCD34D", borderRadius: 12, padding: "10px 14px", margin: "4px 0" },
+  comboAlertOn: { background: "#ECFDF5", border: "1.5px solid #6EE7B7" },
+  comboAddBtn: { background: "#FCA311", color: "#14213D", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 14, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" },
+  comboQuitBtn: { background: "transparent", color: "#0E7A4F", border: "1.5px solid #6EE7B7", borderRadius: 8, padding: "9px 16px", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
   ghostBtn: { background: "#fff", color: "#455", border: "1px solid #D7DCE5", borderRadius: 10, padding: "12px 20px", fontSize: 15, cursor: "pointer" },
   deleteBtn: { background: "#FFF1F2", color: "#E11D48", border: "1px solid #FECDD3", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
 
