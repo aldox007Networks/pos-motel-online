@@ -155,6 +155,7 @@ export default function App() {
   const [mermasPos, setMermasPos] = useState([]);
   const [procesando, setProcesando] = useState(false);
   const [cancelarModal, setCancelarModal] = useState(null); // {ticket, motivo, nota}
+  const [verTicket, setVerTicket] = useState(null); // ticket a visualizar/imprimir desde el historial
   const [cancelaciones, setCancelaciones] = useState([]);
   const [cortesiaModal, setCortesiaModal] = useState(null); // {ticket, autoriza} - elegir quién autoriza
   const [resguardoVista, setResguardoVista] = useState(null); // nota de procedimiento para preparados cancelados
@@ -3053,7 +3054,8 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       {t.cancelado ? <span style={{ ...S.stockPill, background: "#E11D48" }}>Cancelado</span>
                         : <span style={{ ...S.stockPill, background: "#0E9F6E" }}>OK</span>}
                     </td>
-                    <td style={{ ...S.td, textAlign: "center" }}>
+                    <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}>
+                      <button style={{ ...S.miniBtn, borderColor: "#14213D", color: "#14213D", fontWeight: 700 }} onClick={() => setVerTicket(t)}>👁️ Ver</button>{" "}
                       {!t.cancelado && <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }} onClick={() => cancelarTicket(t)}>🚫 Cancelar</button>}
                     </td>
                   </tr>
@@ -3061,6 +3063,56 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </tbody>
             </table>
             {historial.length === 0 && <div style={S.emptyCart}>Aún no hay ventas registradas.</div>}
+          </div>
+        </div>
+      )}
+
+      {/* ---------- ver ticket (detalle + imprimir/PDF) ---------- */}
+      {verTicket && (
+        <div style={S.overlay} onClick={(e) => e.stopPropagation()}>
+          <div style={{ ...S.modal, maxWidth: 340 }}>
+            <div id="print-area" style={S.ticket}>
+              <div style={{ textAlign: "center", fontWeight: 800, letterSpacing: 2 }}>{SUCURSALES[verTicket.sucursal].nombre}</div>
+              <div style={{ textAlign: "center", fontSize: 11 }}>
+                Ticket #{String(verTicket.folio).padStart(4, "0")} · {fechaLarga(verTicket.fecha)}<br />
+                Atendió: {iniciales(verTicket.cajera)} · Turno {verTicket.turno}
+              </div>
+              {verTicket.habitacion && (
+                <div style={{ textAlign: "center", fontWeight: 800, fontSize: 15, marginTop: 6 }}>{verTicket.habitacion}</div>
+              )}
+              {verTicket.cancelado && (
+                <div style={{ textAlign: "center", fontWeight: 800, fontSize: 14, color: "#E11D48", marginTop: 6 }}>*** CANCELADO ***</div>
+              )}
+              <hr style={S.hr} />
+              {(verTicket.items || []).map((it, i) => (
+                <div key={i} style={S.tkRow}><span style={{ flex: 1, marginRight: 6 }}>{it.cant} × {it.nombre}{it.preparado ? " 🍴" : ""}</span><span style={{ whiteSpace: "nowrap" }}>{money(it.precio * it.cant)}</span></div>
+              ))}
+              {(verTicket.items || []).some((it) => it.preparado) && (
+                <div style={{ fontSize: 10, color: "#555", marginTop: 4 }}>🍴 = preparado en sitio</div>
+              )}
+              {(verTicket.combos_aplicados || []).length > 0 && (
+                <>
+                  <hr style={S.hr} />
+                  {(verTicket.combos_aplicados || []).map((c, i) => (
+                    <div key={i} style={{ ...S.tkRow, fontSize: 12 }}><span style={{ flex: 1 }}>🎁 {c.nombre}{c.veces > 1 ? ` ×${c.veces}` : ""}</span><span>combo</span></div>
+                  ))}
+                </>
+              )}
+              <hr style={S.hr} />
+              <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>TOTAL</span><span>{money(verTicket.total)}</span></div>
+              <div style={{ ...S.tkRow, fontSize: 11 }}><span>Pago</span><span>{(verTicket.metodo_pago || "efectivo").toUpperCase()}</span></div>
+              <div style={{ textAlign: "center", fontSize: 11, marginTop: 10 }}>¡Gracias por su preferencia!</div>
+            </div>
+            <div style={S.modalActions} className="no-print">
+              <button style={S.ghostBtn} onClick={() => { setVerTicket(null); refocus(); }}>Cerrar</button>
+              <button style={S.payBtn} onClick={async () => {
+                if (agenteOk) {
+                  try { await imprimirPorAgente(ticketALineas(verTicket), false); return; }
+                  catch (e) { setErrorMsg("Agente: " + e.message + " — usando impresión del navegador."); }
+                }
+                imprimir();
+              }}>🖨️ Imprimir / PDF</button>
+            </div>
           </div>
         </div>
       )}
