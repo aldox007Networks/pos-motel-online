@@ -808,6 +808,30 @@ export default function App() {
   };
   const quitarCombo = (id) => setCombosAplicados((prev) => prev.filter((a) => a.id !== id));
 
+  // Botón de combo: agrega sus productos al carrito y lo deja ya aplicado
+  const agregarComboAlCarrito = (combo) => {
+    const faltantes = [];
+    setCart((c) => {
+      const nuevo = [...c];
+      for (const ci of (combo.items || [])) {
+        const prod = products.find((p) => p.id === ci.producto_id || p.codigo === ci.codigo);
+        if (!prod) { faltantes.push(ci.nombre); continue; }
+        const need = Number(ci.cant) || 1;
+        const i = nuevo.findIndex((x) => x.id === prod.id);
+        if (i >= 0) nuevo[i] = { ...nuevo[i], cant: nuevo[i].cant + need };
+        else nuevo.push({ id: prod.id, nombre: prod.nombre, codigo: prod.codigo, precio: Number(prod.precio), cant: need, preparado: !!prod.preparado, categoria: prod.categoria || null });
+      }
+      return nuevo;
+    });
+    if (faltantes.length) { setErrorMsg("Faltan productos del combo en este motel: " + faltantes.join(", ")); return; }
+    // marcar como aplicado (en el siguiente render ya estará el carrito actualizado)
+    setCombosAplicados((prev) => prev.some((a) => a.id === combo.id) ? prev : [...prev, { id: combo.id, nombre: combo.nombre, veces: 1 }]);
+    setFlash({ nombre: `${combo.emoji || "🎁"} ${combo.nombre} agregado` }); setTimeout(() => setFlash(null), 1200);
+  };
+
+  // ¿aplica el combo hoy? (día válido)
+  const comboAplicaHoy = (combo) => combo.activo && (combo.dias || []).includes(new Date().getDay());
+
   const matches = useMemo(() => {
     const q = scan.trim().toLowerCase();
     if (q.length < 2 || /^\d+$/.test(q)) return [];
@@ -2264,10 +2288,14 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
 
           <aside style={S.col}>
             <div style={S.panelTitle}>Acceso rápido — sin código</div>
-            {categorias.length > 0 && (
+            {(categorias.length > 0 || combos.some((c) => c.activo)) && (
               <div style={S.catBar}>
                 <button style={{ ...S.catChip, ...(catFiltro === "todas" ? S.catChipOn : {}) }}
                   onClick={(e) => { e.stopPropagation(); setCatFiltro("todas"); }}>Todos</button>
+                {combos.some((c) => c.activo) && (
+                  <button style={{ ...S.catChip, ...(catFiltro === "__combos__" ? S.catChipOn : {}) }}
+                    onClick={(e) => { e.stopPropagation(); setCatFiltro("__combos__"); }}>🎁 Combos</button>
+                )}
                 {categorias.map((c) => (
                   <button key={c.id} style={{ ...S.catChip, ...(catFiltro === c.nombre ? S.catChipOn : {}) }}
                     onClick={(e) => { e.stopPropagation(); setCatFiltro(c.nombre); }}>{c.emoji} {c.nombre}</button>
@@ -2279,7 +2307,25 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               </div>
             )}
             <div style={S.quickGrid}>
-              {products.filter((p) => p.rapido)
+              {/* Botones de COMBOS (en el grupo Combos o en "Todos") */}
+              {(catFiltro === "__combos__" || catFiltro === "todas") && combos.filter((c) => c.activo).map((c) => {
+                const hoy = comboAplicaHoy(c);
+                const normal = (c.items || []).reduce((s, ci) => { const p = products.find((x) => x.id === ci.producto_id || x.codigo === ci.codigo); return s + (p ? Number(p.precio) * (Number(ci.cant) || 1) : 0); }, 0);
+                return (
+                  <button key={"combo-" + c.id} disabled={!hoy}
+                    style={{ ...S.quickBtn, border: "2px solid #FCA311", background: hoy ? "#FFFBEB" : "#F3F4F6", opacity: hoy ? 1 : 0.55, cursor: hoy ? "pointer" : "not-allowed" }}
+                    title={hoy ? "Agregar este combo al ticket" : "Este combo no aplica hoy (" + diasTexto(c.dias) + ")"}
+                    onClick={(e) => { e.stopPropagation(); if (hoy) agregarComboAlCarrito(c); }}>
+                    <span style={{ fontSize: 30 }}>{c.emoji || "🎁"}</span>
+                    <span style={S.quickName}>{c.nombre}</span>
+                    <span style={S.quickPrice}>{money(c.precio)}</span>
+                    {normal > c.precio && <span style={{ fontSize: 11, color: "#0E9F6E", fontWeight: 700 }}>ahorra {money(normal - c.precio)}</span>}
+                    {!hoy && <span style={{ fontSize: 10, color: "#B45309" }}>solo {diasTexto(c.dias)}</span>}
+                  </button>
+                );
+              })}
+              {/* Productos normales (ocultos cuando el filtro es Combos) */}
+              {catFiltro !== "__combos__" && products.filter((p) => p.rapido)
                 .filter((p) => catFiltro === "todas" ? true : catFiltro === "__sin__" ? !p.categoria : p.categoria === catFiltro)
                 .map((p) => (
                 <button key={p.id} style={S.quickBtn} onClick={(e) => { e.stopPropagation(); addToCart(p); }}>
