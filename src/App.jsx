@@ -547,9 +547,10 @@ export default function App() {
       const precioVenta = Number(p.precio_venta) || 0;
       if (existentes && existentes.length > 0) {
         // ya existe: sumar stock Y actualizar el precio y la categoría al del almacén
+        // (también lo dejamos como botón rápido para que aparezca en Ventas)
         const destino = existentes[0];
         const { error } = await supabase.from("productos")
-          .update({ stock: destino.stock + cant, precio: precioVenta, categoria: p.categoria || destino.categoria || null }).eq("id", destino.id);
+          .update({ stock: destino.stock + cant, precio: precioVenta, rapido: true, categoria: p.categoria || destino.categoria || null }).eq("id", destino.id);
         if (error) throw error;
       } else {
         // no existe: crear con el precio y la categoría del almacén
