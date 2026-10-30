@@ -475,8 +475,8 @@ export default function App() {
         nota: (darBaja.nota || "").trim(), usuario: perfil.nombre,
       }).select().single();
       if (e1) throw e1;
-      // 2) descontar del almacén
-      const { error: e2 } = await supabase.from("almacen").update({ stock: p.stock - cant }).eq("id", p.id);
+      // 2) descontar del almacén (atómico)
+      const { error: e2 } = await supabase.rpc("ajustar_stock_almacen", { p_id: p.id, p_delta: -cant });
       if (e2) throw e2;
       setAlmacen((xs) => xs.map((x) => (x.id === p.id ? { ...x, stock: x.stock - cant } : x)));
       if (bajaData) setBajas((bs) => [bajaData, ...bs]);
@@ -522,11 +522,10 @@ export default function App() {
     const costoAnterior = Number(p.costo) || 0;
     const costoNuevo = almResurtir.costo === "" || almResurtir.costo == null ? costoAnterior : (parseFloat(almResurtir.costo) || 0);
     const cambiaCosto = costoNuevo !== costoAnterior;
-    // actualizar stock y, si cambió, el costo vigente del producto (el precio de venta NO se toca)
-    const upd = { stock: p.stock + cant };
-    if (cambiaCosto) upd.costo = costoNuevo;
-    const { error } = await supabase.from("almacen").update(upd).eq("id", p.id);
+    // sumar stock de forma ATÓMICA; el costo (si cambió) se actualiza aparte
+    const { error } = await supabase.rpc("ajustar_stock_almacen", { p_id: p.id, p_delta: cant });
     if (error) { setErrorMsg("No se pudo registrar: " + error.message); return; }
+    if (cambiaCosto) await supabase.from("almacen").update({ costo: costoNuevo }).eq("id", p.id);
     const ent = {
       producto_id: p.id, nombre: p.nombre, codigo: p.codigo, cantidad: cant,
       stock_anterior: p.stock, stock_nuevo: p.stock + cant,
@@ -555,11 +554,13 @@ export default function App() {
       let creado = false;
       const precioVenta = Number(p.precio_venta) || 0;
       if (existentes && existentes.length > 0) {
-        // ya existe: sumar stock Y actualizar el precio y la categoría al del almacén
+        // ya existe: sumar stock de forma ATÓMICA; precio/categoría/rápido aparte
         // (también lo dejamos como botón rápido para que aparezca en Ventas)
         const destino = existentes[0];
+        const { error: eStk } = await supabase.rpc("ajustar_stock_producto", { p_id: destino.id, p_delta: cant });
+        if (eStk) throw eStk;
         const { error } = await supabase.from("productos")
-          .update({ stock: destino.stock + cant, precio: precioVenta, rapido: true, categoria: p.categoria || destino.categoria || null }).eq("id", destino.id);
+          .update({ precio: precioVenta, rapido: true, categoria: p.categoria || destino.categoria || null }).eq("id", destino.id);
         if (error) throw error;
       } else {
         // no existe: crear con el precio y la categoría del almacén
@@ -571,8 +572,8 @@ export default function App() {
         if (error) throw error;
         creado = true;
       }
-      // 2) descontar del almacén
-      const { error: e2 } = await supabase.from("almacen").update({ stock: p.stock - cant }).eq("id", p.id);
+      // 2) descontar del almacén (atómico)
+      const { error: e2 } = await supabase.rpc("ajustar_stock_almacen", { p_id: p.id, p_delta: -cant });
       if (e2) throw e2;
       // 3) registrar el traspaso
       const { data: tData } = await supabase.from("traspasos").insert({
@@ -911,10 +912,9 @@ export default function App() {
       };
       const { data, error } = await supabase.from("tickets").insert(t).select().single();
       if (error) throw error;
-      // descontar stock
+      // descontar stock de forma ATÓMICA (la base resta sobre su valor real)
       for (const it of cart) {
-        const p = products.find((x) => x.id === it.id);
-        if (p) await supabase.from("productos").update({ stock: p.stock - it.cant }).eq("id", it.id);
+        await supabase.rpc("ajustar_stock_producto", { p_id: it.id, p_delta: -it.cant });
       }
       setProducts((ps) => ps.map((p) => {
         const it = cart.find((x) => x.id === p.id);
@@ -942,8 +942,8 @@ export default function App() {
     if (cant > p.stock) { setErrorMsg("No puedes mermar más de lo que hay (disponible: " + p.stock + ")."); return; }
     setProcesando(true); setErrorMsg("");
     try {
-      // descontar del inventario del motel
-      const { error } = await supabase.from("productos").update({ stock: p.stock - cant }).eq("id", p.id);
+      // descontar del inventario del motel (atómico)
+      const { error } = await supabase.rpc("ajustar_stock_producto", { p_id: p.id, p_delta: -cant });
       if (error) throw error;
       // registrar la merma (auditoría)
       const { data } = await supabase.from("mermas_pos").insert({
@@ -1002,10 +1002,9 @@ export default function App() {
       // 1) marcar el ticket como cancelado
       const { error } = await supabase.from("tickets").update({ cancelado: true }).eq("id", t.id);
       if (error) throw error;
-      // 2) devolver al inventario SOLO los empaquetados de fábrica
+      // 2) devolver al inventario SOLO los empaquetados de fábrica (atómico)
       for (const it of empaquetados) {
-        const p = products.find((x) => x.id === it.id);
-        if (p) await supabase.from("productos").update({ stock: p.stock + it.cant }).eq("id", it.id);
+        await supabase.rpc("ajustar_stock_producto", { p_id: it.id, p_delta: it.cant });
       }
       // 3) nota de resguardo para los preparados
       const notaPrep = preparados.length
@@ -1356,7 +1355,7 @@ export default function App() {
         const { data: enAlm } = await supabase.from("almacen").select("*").eq("codigo", p.codigo).limit(1);
         if (enAlm && enAlm.length > 0) {
           const a = enAlm[0];
-          const { error: e1 } = await supabase.from("almacen").update({ stock: a.stock + p.stock }).eq("id", a.id);
+          const { error: e1 } = await supabase.rpc("ajustar_stock_almacen", { p_id: a.id, p_delta: p.stock });
           if (e1) throw e1;
         } else {
           // no existe en almacén: crearlo con ese stock para no perder unidades
@@ -1402,7 +1401,7 @@ export default function App() {
       const { data: enAlm } = await supabase.from("almacen").select("*").eq("codigo", p.codigo).limit(1);
       if (enAlm && enAlm.length > 0) {
         const a = enAlm[0];
-        const { error: e1 } = await supabase.from("almacen").update({ stock: a.stock + cant }).eq("id", a.id);
+        const { error: e1 } = await supabase.rpc("ajustar_stock_almacen", { p_id: a.id, p_delta: cant });
         if (e1) throw e1;
       } else {
         // no existe en almacén: crearlo con esa cantidad para no perder unidades
@@ -1413,8 +1412,8 @@ export default function App() {
         });
         if (e1) throw e1;
       }
-      // 2) descontar del inventario del motel (el producto SIGUE existiendo)
-      const { error: e2 } = await supabase.from("productos").update({ stock: p.stock - cant }).eq("id", p.id);
+      // 2) descontar del inventario del motel (atómico, el producto SIGUE existiendo)
+      const { error: e2 } = await supabase.rpc("ajustar_stock_producto", { p_id: p.id, p_delta: -cant });
       if (e2) throw e2;
       // 3) registrar el retorno con motivo + nota
       const motLabel = { sobrestock: "Sobrestock", mala_ubicacion: "Mala ubicación", reacomodo: "Reacomodo", baja_rotacion: "Baja rotación", otro: "Otro" }[motivo] || motivo;
@@ -1436,7 +1435,7 @@ export default function App() {
     const cant = parseInt(resurtir.cantidad) || 0;
     if (cant <= 0) return;
     const p = resurtir.producto;
-    const { error } = await supabase.from("productos").update({ stock: p.stock + cant }).eq("id", p.id);
+    const { error } = await supabase.rpc("ajustar_stock_producto", { p_id: p.id, p_delta: cant });
     if (error) { setErrorMsg("No se pudo resurtir: " + error.message); return; }
     const ent = {
       sucursal, producto_id: p.id, nombre: p.nombre, cantidad: cant,
