@@ -150,6 +150,7 @@ export default function App() {
   const [repTickets, setRepTickets] = useState([]); // tickets del periodo del reporte
   const [repCargando, setRepCargando] = useState(false);
   const [repTicketVista, setRepTicketVista] = useState(null); // ticket que se ve/imprime
+  const [repProducto, setRepProducto] = useState(""); // producto elegido para el reporte por producto (código)
   const [turnosAbiertos, setTurnosAbiertos] = useState([]);
   const [mermaModal, setMermaModal] = useState(null); // {producto?, cantidad, momento, nota}
   const [mermasPos, setMermasPos] = useState([]);
@@ -646,6 +647,34 @@ export default function App() {
       turnos: Object.values(turnos).sort((a, b) => a.turno - b.turno),
       productos: Object.values(prods).sort((a, b) => b.importe - a.importe),
     };
+  }, [repTickets]);
+
+  // Reporte de UN producto: unidades vendidas y en qué tickets aparece (en el rango cargado)
+  const repPorProducto = useMemo(() => {
+    if (!repProducto) return null;
+    let unidades = 0, importe = 0;
+    const enTickets = [];
+    repTickets.forEach((t) => {
+      if (t.cancelado) return;
+      const lineas = (t.items || []).filter((it) => (it.codigo || it.nombre) === repProducto);
+      if (!lineas.length) return;
+      const cantT = lineas.reduce((s, it) => s + Number(it.cant), 0);
+      const impT = lineas.reduce((s, it) => s + Number(it.precio) * Number(it.cant), 0);
+      unidades += cantT; importe += impT;
+      enTickets.push({ folio: t.folio, fecha: t.fecha, habitacion: t.habitacion, cajera: t.cajera, turno: t.turno, metodo: t.metodo_pago || "efectivo", cant: cantT, importe: impT, ticket: t });
+    });
+    const nombre = (repTickets.flatMap((t) => t.items || []).find((it) => (it.codigo || it.nombre) === repProducto) || {}).nombre || repProducto;
+    return { nombre, codigo: repProducto, unidades, importe, tickets: enTickets };
+  }, [repProducto, repTickets]);
+
+  // lista de productos que aparecen en el periodo (para el selector)
+  const productosDelPeriodo = useMemo(() => {
+    const m = {};
+    repTickets.forEach((t) => (t.items || []).forEach((it) => {
+      const k = it.codigo || it.nombre;
+      if (!m[k]) m[k] = { codigo: k, nombre: it.nombre };
+    }));
+    return Object.values(m).sort((a, b) => a.nombre.localeCompare(b.nombre));
   }, [repTickets]);
 
   const cargarMonitor = useCallback(async () => {
@@ -3913,6 +3942,61 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                     ))}
                   </tbody>
                 </table>
+              </div>
+
+              {/* Búsqueda por producto específico */}
+              <div style={{ ...S.card, marginTop: 16 }}>
+                <div style={S.cardTitle}>🔎 Ventas de un producto en el periodo</div>
+                <div className="no-print" style={{ marginBottom: 12 }}>
+                  <label style={S.label}>Elige el producto</label>
+                  <select style={S.input} value={repProducto} onChange={(e) => setRepProducto(e.target.value)}>
+                    <option value="">— Selecciona un producto —</option>
+                    {productosDelPeriodo.map((p) => <option key={p.codigo} value={p.codigo}>{p.nombre}</option>)}
+                  </select>
+                </div>
+                {repProducto && repPorProducto && (
+                  <>
+                    <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>{repPorProducto.nombre}</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
+                      <div style={{ background: "#EFF6FF", borderRadius: 10, padding: 14 }}>
+                        <div style={{ fontSize: 12, color: "#2563EB", fontWeight: 700 }}>UNIDADES VENDIDAS</div>
+                        <div style={{ fontSize: 26, fontWeight: 800, color: "#2563EB" }}>{repPorProducto.unidades}</div>
+                      </div>
+                      <div style={{ background: "#F0FDF4", borderRadius: 10, padding: 14 }}>
+                        <div style={{ fontSize: 12, color: "#0E9F6E", fontWeight: 700 }}>IMPORTE TOTAL</div>
+                        <div style={{ fontSize: 26, fontWeight: 800, color: "#0E9F6E" }}>{money(repPorProducto.importe)}</div>
+                      </div>
+                      <div style={{ background: "#F7F8FA", borderRadius: 10, padding: 14 }}>
+                        <div style={{ fontSize: 12, color: "#8A93A3", fontWeight: 700 }}>TICKETS CON ESTE PRODUCTO</div>
+                        <div style={{ fontSize: 26, fontWeight: 800 }}>{repPorProducto.tickets.length}</div>
+                      </div>
+                    </div>
+                    {repPorProducto.tickets.length === 0 ? (
+                      <div style={S.emptyCart}>Este producto no se vendió en el periodo seleccionado.</div>
+                    ) : (
+                      <table style={S.table}>
+                        <thead><tr><th style={S.th}>Folio</th><th style={S.th}>Fecha/Hora</th><th style={S.th}>Habitación</th><th style={S.th}>Cajera</th><th style={S.thC}>Turno</th><th style={S.thC}>Cant.</th><th style={S.thR}>Importe</th><th style={S.thC} className="no-print">Ver</th></tr></thead>
+                        <tbody>
+                          {repPorProducto.tickets.map((r) => (
+                            <tr key={r.folio}>
+                              <td style={S.td}>#{String(r.folio).padStart(4, "0")}</td>
+                              <td style={S.td}>{String(r.fecha).slice(0, 10)} {horaStr(r.fecha)}</td>
+                              <td style={S.td}>{r.habitacion || "—"}</td>
+                              <td style={S.td}>{r.cajera}</td>
+                              <td style={{ ...S.td, textAlign: "center" }}>T{r.turno}</td>
+                              <td style={{ ...S.td, textAlign: "center", fontWeight: 700 }}>{r.cant}</td>
+                              <td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(r.importe)}</td>
+                              <td style={{ ...S.td, textAlign: "center" }} className="no-print">
+                                <button style={S.miniBtn} onClick={() => setRepTicketVista(r.ticket)}>👁 Ver</button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </>
+                )}
+                {!repProducto && <div style={S.emptyCart} className="no-print">Elige un producto para ver cuántos se vendieron y en qué tickets.</div>}
               </div>
 
               {/* Detalle de tickets */}
