@@ -85,6 +85,30 @@ const iniciales = (nombre) => String(nombre || "").trim().split(/\s+/).map((p) =
 // Pone TODAS las líneas de texto/renglón en negrita (para que la impresión térmica
 // se note bien). No toca separadores (hr) ni avances de papel (feed).
 const enNegrita = (lineas) => lineas.map((l) => (l.hr || l.feed != null) ? l : { ...l, bold: true });
+
+// Agrupa una lista de inventario por categoría y devuelve líneas ESC/POS con
+// un encabezado por cada categoría. Así la cajera cuenta ordenado por como lo
+// tiene acomodado físicamente. `fila(p)` arma el renglón de cada producto.
+const inventarioAgrupado = (inventario, fila) => {
+  const L = [];
+  const grupos = {};
+  (inventario || []).forEach((p) => {
+    const cat = (p.categoria && String(p.categoria).trim()) || "Sin categoría";
+    (grupos[cat] = grupos[cat] || []).push(p);
+  });
+  // ordenar categorías alfabéticamente, pero "Sin categoría" al final
+  const nombresCat = Object.keys(grupos).sort((a, b) => {
+    if (a === "Sin categoría") return 1;
+    if (b === "Sin categoría") return -1;
+    return a.localeCompare(b);
+  });
+  nombresCat.forEach((cat) => {
+    L.push({ t: `>> ${cat.toUpperCase()}`, bold: true });
+    grupos[cat].slice().sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)))
+      .forEach((p) => L.push(fila(p)));
+  });
+  return L;
+};
 const fechaLarga = (iso) => new Date(iso).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" });
 
 const TURNOS = [
@@ -747,7 +771,7 @@ export default function App() {
         por_categoria: porCategoria,
         num_ventas: validos.length, cancelados: lista.length - validos.length,
         folios: lista.map((x) => x.folio).sort((a, b) => a - b),
-        inventario: (prods || []).map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock })),
+        inventario: (prods || []).map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock, categoria: p.categoria || null })),
       };
       const { data: c, error } = await supabase.from("cortes").insert(corte).select().single();
       if (error) throw error;
@@ -772,6 +796,28 @@ export default function App() {
     if (perfil && view === "ventas" && habitacion && !confirmVenta && !ticketListo && !corteVista && scanRef.current) scanRef.current.focus();
   }, [perfil, view, habitacion, confirmVenta, ticketListo, corteVista]);
   useEffect(() => { refocus(); const t = setInterval(refocus, 1500); return () => clearInterval(t); }, [refocus]);
+
+  // Renderiza el inventario agrupado por categoría en los modales de pantalla
+  const renderInventarioAgrupado = (inventario) => {
+    const grupos = {};
+    (inventario || []).forEach((p) => {
+      const cat = (p.categoria && String(p.categoria).trim()) || "Sin categoría";
+      (grupos[cat] = grupos[cat] || []).push(p);
+    });
+    const nombresCat = Object.keys(grupos).sort((a, b) => {
+      if (a === "Sin categoría") return 1;
+      if (b === "Sin categoría") return -1;
+      return a.localeCompare(b);
+    });
+    return nombresCat.map((cat) => (
+      <div key={cat}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: "#14213D", marginTop: 6, borderBottom: "1px solid #E5E8EE" }}>▸ {cat}</div>
+        {grupos[cat].slice().sort((a, b) => String(a.nombre).localeCompare(String(b.nombre))).map((p, i) => (
+          <div key={i} style={{ ...S.tkRow, fontSize: 11 }}><span>{p.nombre}</span><span><b>{p.stock}</b> u</span></div>
+        ))}
+      </div>
+    ));
+  };
 
   /* ============ CARRITO ============ */
   const addToCart = (p) => {
@@ -1106,7 +1152,7 @@ export default function App() {
       num_ventas: validos.length,
       cancelados: lista.length - validos.length,
       folios: lista.map((t) => t.folio).sort((a, b) => a - b),
-      inventario: products.map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock })),
+      inventario: products.map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock, categoria: p.categoria || null })),
       _sinVentas: lista.length === 0,
     };
     setCortePrevia(corte);
@@ -1148,7 +1194,7 @@ export default function App() {
       total: validos.reduce((s, t) => s + Number(t.total), 0),
       num_ventas: validos.length,
       cancelados: lista.length - validos.length,
-      inventario: products.map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock })),
+      inventario: products.map((p) => ({ nombre: p.nombre, codigo: p.codigo, stock: p.stock, categoria: p.categoria || null })),
     });
   };
 
@@ -1170,7 +1216,7 @@ export default function App() {
       { hr: true },
       { t: "INVENTARIO PARA CONTEO", align: "center", bold: true },
     ];
-    (c.inventario || []).forEach((p) => L.push({ row: [p.nombre, `${p.stock} u`] }));
+    inventarioAgrupado(c.inventario, (p) => ({ row: [p.nombre, `${p.stock} u`] })).forEach((l) => L.push(l));
     L.push({ feed: 1 });
     L.push({ t: "Efectivo contado: ____________" });
     L.push({ feed: 1 });
@@ -1194,7 +1240,8 @@ export default function App() {
       `Folios: ${(c.folios || []).map((f) => "#" + String(f).padStart(4, "0")).join(", ")}`,
       `--------------------------------`,
       `INVENTARIO QUE SE ENTREGA`,
-      ...(c.inventario || []).map((p) => `${String(p.codigo).padEnd(14)} ${String(p.stock).padStart(5)}  ${p.nombre}`),
+      ...inventarioAgrupado(c.inventario, (p) => ({ _txt: `${String(p.codigo).padEnd(14)} ${String(p.stock).padStart(5)}  ${p.nombre}` }))
+        .map((l) => l._txt != null ? l._txt : `>> ${String(l.t).replace(/^>> /, "")}`),
       `--------------------------------`,
       `Entrega (cajera saliente): ______________________`,
       `Recibe (cajera entrante): ______________________`,
@@ -1603,7 +1650,7 @@ export default function App() {
     L.push({ row: ["Canceladas", String(c.cancelados)] });
     L.push({ hr: true });
     L.push({ t: "INVENTARIO QUE SE ENTREGA", align: "center", bold: true });
-    (c.inventario || []).forEach((p) => L.push({ row: [p.nombre, `${p.stock} u`] }));
+    inventarioAgrupado(c.inventario, (p) => ({ row: [p.nombre, `${p.stock} u`] })).forEach((l) => L.push(l));
     L.push({ feed: 2 });
     L.push({ t: "Entrega: ______________________" });
     L.push({ feed: 1 });
@@ -2493,9 +2540,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ fontSize: 10, marginTop: 6 }}>Folios: {(cortePrevia.folios || []).map((f) => "#" + String(f).padStart(4, "0")).join(", ")}</div>
               <hr style={S.hr} />
               <div style={{ textAlign: "center", fontWeight: 700, fontSize: 12 }}>INVENTARIO QUE SE ENTREGA</div>
-              {(cortePrevia.inventario || []).map((p, i) => (
-                <div key={i} style={{ ...S.tkRow, fontSize: 11 }}><span>{p.nombre}</span><span><b>{p.stock}</b> u</span></div>
-              ))}
+              {renderInventarioAgrupado(cortePrevia.inventario)}
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }} className="no-print">
@@ -2564,9 +2609,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={{ fontSize: 10, marginTop: 6 }}>Folios: {(corteVista.folios || []).map((f) => "#" + String(f).padStart(4, "0")).join(", ")}</div>
               <hr style={S.hr} />
               <div style={{ textAlign: "center", fontWeight: 700, fontSize: 12 }}>INVENTARIO QUE SE ENTREGA</div>
-              {(corteVista.inventario || []).map((p, i) => (
-                <div key={i} style={{ ...S.tkRow, fontSize: 11 }}><span>{p.nombre}</span><span><b>{p.stock}</b> u</span></div>
-              ))}
+              {renderInventarioAgrupado(corteVista.inventario)}
               <div style={{ marginTop: 22, fontSize: 11 }}>Entrega (cajera saliente): ______________</div>
               <div style={{ marginTop: 14, fontSize: 11 }}>Recibe (cajera entrante): ______________</div>
               <div style={{ marginTop: 14, fontSize: 11 }}>Vo.Bo. supervisor: ______________</div>
@@ -2605,9 +2648,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <div style={S.tkRow}><span>Canceladas</span><span>{preCorte.cancelados}</span></div>
               <hr style={S.hr} />
               <div style={{ textAlign: "center", fontWeight: 700, fontSize: 12 }}>INVENTARIO PARA CONTEO</div>
-              {(preCorte.inventario || []).map((p, i) => (
-                <div key={i} style={{ ...S.tkRow, fontSize: 11 }}><span>{p.nombre}</span><span><b>{p.stock}</b> u</span></div>
-              ))}
+              {renderInventarioAgrupado(preCorte.inventario)}
               <div style={{ marginTop: 22, fontSize: 11 }}>Efectivo contado: ______________</div>
               <div style={{ marginTop: 14, fontSize: 11 }}>Diferencia: ______________</div>
               <div style={{ marginTop: 14, fontSize: 11 }}>Firma: ______________</div>
