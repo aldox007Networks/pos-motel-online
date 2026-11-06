@@ -82,6 +82,9 @@ const horaStr = (iso) => new Date(iso).toLocaleTimeString("es-MX", { hour: "2-di
 const rolLabel = (rol) => rol === "propietario" ? "Propietario" : rol === "admin" ? "Supervisor" : "Cajera";
 // Iniciales de un nombre para el ticket del huésped (no expone el nombre completo)
 const iniciales = (nombre) => String(nombre || "").trim().split(/\s+/).map((p) => p[0] || "").join("").slice(0, 3).toUpperCase() || "—";
+// Pone TODAS las líneas de texto/renglón en negrita (para que la impresión térmica
+// se note bien). No toca separadores (hr) ni avances de papel (feed).
+const enNegrita = (lineas) => lineas.map((l) => (l.hr || l.feed != null) ? l : { ...l, bold: true });
 const fechaLarga = (iso) => new Date(iso).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" });
 
 const TURNOS = [
@@ -1174,7 +1177,7 @@ export default function App() {
     L.push({ t: "Diferencia: __________________" });
     L.push({ feed: 1 });
     L.push({ t: "Firma: _______________________" });
-    return L;
+    return enNegrita(L);
   };
 
   const corteTexto = (c) => {
@@ -1571,7 +1574,7 @@ export default function App() {
     L.push({ row: ["TOTAL", money(t.total).replace("MX$", "$")], bold: true, size: 2 });
     L.push({ feed: 1 });
     L.push({ t: "Gracias por su preferencia!", align: "center" });
-    return L;
+    return enNegrita(L);
   };
 
   // convierte un corte a líneas ESC/POS
@@ -1607,7 +1610,7 @@ export default function App() {
     L.push({ t: "Recibe:  ______________________" });
     L.push({ feed: 1 });
     L.push({ t: "Vo.Bo.:  ______________________" });
-    return L;
+    return enNegrita(L);
   };
 
   const imprimirPorAgente = async (lineas, abrirGaveta = false) => {
