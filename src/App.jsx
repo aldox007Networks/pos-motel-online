@@ -945,11 +945,23 @@ export default function App() {
         .eq("sucursal", sucursal).order("folio", { ascending: false }).limit(1);
       const folio = (ult?.[0]?.folio || 0) + 1;
       // detalle de combos aplicados (para el ticket y reportes)
+      // Guardamos también el descuento y la categoría principal del combo, para
+      // que el resumen por categoría del corte cuadre con el total cobrado.
       const combosDetalle = combosAplicados.map((ap) => {
         const combo = combos.find((c) => c.id === ap.id);
-        const veces = combo ? Math.min(ap.veces || 1, vecesEnCarrito(combo)) : 0;
-        return combo ? { nombre: combo.nombre, precio: Number(combo.precio), veces } : null;
-      }).filter(Boolean).filter((c) => c.veces > 0);
+        if (!combo) return null;
+        const veces = Math.min(ap.veces || 1, vecesEnCarrito(combo));
+        if (veces <= 0) return null;
+        const precioNormal = (combo.items || []).reduce((s, ci) => {
+          const enCarro = cart.find((x) => x.id === ci.producto_id || x.codigo === ci.codigo);
+          return s + (enCarro ? enCarro.precio : 0) * Number(ci.cant || 1);
+        }, 0);
+        const descuento = Math.max(0, (precioNormal - Number(combo.precio))) * veces;
+        // categoría principal del combo = la de su primer producto
+        const primer = (combo.items || [])[0];
+        const catPrincipal = primer ? principalDeItem({ codigo: primer.codigo, nombre: primer.nombre }) : "Sin categoría";
+        return { nombre: combo.nombre, precio: Number(combo.precio), veces, descuento, categoria_principal: catPrincipal };
+      }).filter(Boolean);
       const t = {
         sucursal, folio,
         items: cart,
@@ -1115,7 +1127,9 @@ export default function App() {
     return (cat && cat.principal) || principalDeSubcat(subcat) || "Sin categoría";
   };
 
-  // Suma por categoría principal (solo efectivo + transferencia, SIN cortesías)
+  // Suma por categoría principal (solo efectivo + transferencia, SIN cortesías).
+  // Resta el descuento de cada combo de su categoría, para que la suma por
+  // categoría cuadre exactamente con el total cobrado.
   const resumenPorCategoria = (ticketsValidos) => {
     const acc = {};
     ticketsValidos.forEach((t) => {
@@ -1124,10 +1138,18 @@ export default function App() {
         const pr = principalDeItem(it);
         acc[pr] = (acc[pr] || 0) + Number(it.precio) * Number(it.cant);
       });
+      // restar el ahorro de los combos de este ticket, en su categoría
+      (t.combos_aplicados || []).forEach((c) => {
+        const desc = Number(c.descuento || 0);
+        if (desc <= 0) return;
+        const cat = c.categoria_principal || "Sin categoría";
+        acc[cat] = (acc[cat] || 0) - desc;
+      });
     });
     // ordenar: las principales en el orden definido, y "Sin categoría" al final
     const orden = [...CATEGORIAS_PRINCIPALES, "Sin categoría"];
     return Object.entries(acc)
+      .filter(([, total]) => Math.abs(total) > 0.001) // quitar categorías que quedaron en 0
       .sort((a, b) => orden.indexOf(a[0]) - orden.indexOf(b[0]))
       .map(([nombre, total]) => ({ nombre, total }));
   };
