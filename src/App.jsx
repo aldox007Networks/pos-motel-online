@@ -649,6 +649,17 @@ export default function App() {
     else if (tipo === "mes") { const a = new Date(hoy.getFullYear(), hoy.getMonth(), 1); setRepDesde(d(a)); setRepHasta(d(hoy)); }
   };
 
+  // Determina la categoría principal de un item vendido (usa la categoría
+  // guardada en el item o la del producto actual). Definida ANTES de repCalc
+  // porque repCalc la usa durante el render.
+  const principalDeItem = (it) => {
+    const prod = products.find((p) => p.codigo === it.codigo || p.nombre === it.nombre);
+    const subcat = prod?.categoria || it.categoria || null;
+    if (!subcat) return "Sin categoría";
+    const cat = categorias.find((c) => _normCat(c.nombre) === _normCat(subcat));
+    return (cat && cat.principal) || principalDeSubcat(subcat) || "Sin categoría";
+  };
+
   // Cálculos del reporte (sobre los tickets cargados del periodo)
   const repCalc = useMemo(() => {
     const validos = repTickets.filter((t) => !t.cancelado);
@@ -1150,15 +1161,6 @@ export default function App() {
   }, [misPendientes]);
 
   // Resuelve la categoría PRINCIPAL de un item vendido (código → subcategoría → principal)
-  const principalDeItem = (it) => {
-    // 1) por el producto actual (código o nombre); 2) por la categoría que pudiera venir en el propio item
-    const prod = products.find((p) => p.codigo === it.codigo || p.nombre === it.nombre);
-    const subcat = prod?.categoria || it.categoria || null;
-    if (!subcat) return "Sin categoría";
-    const cat = categorias.find((c) => _normCat(c.nombre) === _normCat(subcat));
-    return (cat && cat.principal) || principalDeSubcat(subcat) || "Sin categoría";
-  };
-
   // Suma por categoría principal (solo efectivo + transferencia, SIN cortesías).
   // Resta el descuento de cada combo de su categoría, para que la suma por
   // categoría cuadre exactamente con el total cobrado.
