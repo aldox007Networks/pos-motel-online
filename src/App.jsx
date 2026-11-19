@@ -178,6 +178,7 @@ export default function App() {
   const [repCargando, setRepCargando] = useState(false);
   const [repTicketVista, setRepTicketVista] = useState(null); // ticket que se ve/imprime
   const [repProducto, setRepProducto] = useState(""); // producto elegido para el reporte por producto (código)
+  const [repTipo, setRepTipo] = useState("completo"); // tipo de reporte: cajera|articulo|corte|categoria|completo
   const [turnosAbiertos, setTurnosAbiertos] = useState([]);
   const [mermaModal, setMermaModal] = useState(null); // {producto?, cantidad, momento, nota}
   const [mermasPos, setMermasPos] = useState([]);
@@ -674,6 +675,34 @@ export default function App() {
       if (!prods[k]) prods[k] = { nombre: it.nombre, cant: 0, importe: 0 };
       prods[k].cant += it.cant; prods[k].importe += it.precio * it.cant;
     }));
+    // por corte (agrupa los tickets por su corte_id; los sin corte van en "Turno en curso")
+    const porCorte = {};
+    validos.forEach((t) => {
+      const k = t.corte_id || "__abierto__";
+      if (!porCorte[k]) porCorte[k] = { corte_id: t.corte_id || null, ventas: 0, total: 0, efectivo: 0, transferencia: 0, cortesia: 0, cajera: t.cajera, turno: t.turno, primera: t.fecha, ultima: t.fecha };
+      const g = porCorte[k];
+      g.ventas++; g.total += Number(t.total);
+      g[(t.metodo_pago || "efectivo")] = (g[(t.metodo_pago || "efectivo")] || 0) + Number(t.total);
+      if (t.fecha < g.primera) g.primera = t.fecha;
+      if (t.fecha > g.ultima) g.ultima = t.fecha;
+    });
+    // por categoría principal (resta el ahorro de combos en su categoría)
+    const cats = {};
+    validos.forEach((t) => {
+      (t.items || []).forEach((it) => {
+        const pr = principalDeItem(it);
+        if (!cats[pr]) cats[pr] = { nombre: pr, cant: 0, importe: 0 };
+        cats[pr].cant += Number(it.cant); cats[pr].importe += Number(it.precio) * Number(it.cant);
+      });
+      (t.combos_aplicados || []).forEach((c) => {
+        const desc = Number(c.descuento || 0);
+        if (desc <= 0) return;
+        const cat = c.categoria_principal || "Sin categoría";
+        if (!cats[cat]) cats[cat] = { nombre: cat, cant: 0, importe: 0 };
+        cats[cat].importe -= desc;
+      });
+    });
+    const ordenCat = [...CATEGORIAS_PRINCIPALES, "Sin categoría"];
     return {
       total: validos.reduce((s, t) => s + Number(t.total), 0),
       numVentas: validos.length,
@@ -682,8 +711,11 @@ export default function App() {
       cajeras: Object.values(cajeras).sort((a, b) => b.total - a.total),
       turnos: Object.values(turnos).sort((a, b) => a.turno - b.turno),
       productos: Object.values(prods).sort((a, b) => b.importe - a.importe),
+      cortes: Object.values(porCorte).sort((a, b) => String(b.primera).localeCompare(String(a.primera))),
+      categorias: Object.values(cats).filter((c) => Math.abs(c.importe) > 0.001)
+        .sort((a, b) => ordenCat.indexOf(a.nombre) - ordenCat.indexOf(b.nombre)),
     };
-  }, [repTickets]);
+  }, [repTickets]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reporte de UN producto: unidades vendidas y en qué tickets aparece (en el rango cargado)
   const repPorProducto = useMemo(() => {
@@ -3975,10 +4007,21 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <button style={S.payBtn} disabled={repCargando} onClick={cargarReporte}>{repCargando ? "Cargando…" : "📊 Generar reporte"}</button>
             </div>
             {repTickets.length > 0 && (
-              <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                <button style={S.ghostBtn} onClick={() => window.print()}>🖨️ Imprimir / Guardar PDF</button>
-                <button style={S.ghostBtn} onClick={descargarReporteCSV}>⬇ Descargar CSV (Excel)</button>
-              </div>
+              <>
+                <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: "#14213D" }}>Tipo de reporte:</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {[["completo", "📋 Completo"], ["cajera", "👤 Por cajera"], ["articulo", "📦 Por artículo"], ["corte", "🗂️ Por corte"], ["categoria", "🏷️ Por categoría"]].map(([k, label]) => (
+                    <button key={k} onClick={() => setRepTipo(k)}
+                      style={{ ...S.catChip, ...(repTipo === k ? { background: "#14213D", color: "#fff", borderColor: "#14213D" } : {}) }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                  <button style={S.ghostBtn} onClick={() => window.print()}>🖨️ Imprimir / Guardar PDF</button>
+                  <button style={S.ghostBtn} onClick={descargarReporteCSV}>⬇ Descargar CSV (Excel)</button>
+                </div>
+              </>
             )}
           </div>
 
@@ -3989,7 +4032,9 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <div id="reporte-print">
               <div style={{ textAlign: "center", marginBottom: 16 }}>
                 <div style={{ fontSize: 22, fontWeight: 800 }}>{marcaActiva.nombre}</div>
-                <div style={{ fontSize: 15 }}>Reporte de ventas</div>
+                <div style={{ fontSize: 15 }}>{
+                  { completo: "Reporte de ventas", cajera: "Reporte de ventas por cajera", articulo: "Reporte de ventas por artículo", corte: "Resumen de ventas por corte", categoria: "Resumen de ventas por categoría" }[repTipo]
+                }</div>
                 <div style={{ fontSize: 13, color: "#667" }}>Del {repDesde} al {repHasta}</div>
               </div>
 
@@ -4019,48 +4064,102 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 </div>
               </div>
 
-              <div style={S.repGrid2}>
-                {/* Por cajera */}
-                <div style={S.card}>
-                  <div style={S.cardTitle}>Por cajera</div>
+              {/* === REPORTE POR CAJERA === */}
+              {(repTipo === "completo" || repTipo === "cajera") && (
+                <div style={S.repGrid2}>
+                  <div style={S.card}>
+                    <div style={S.cardTitle}>👤 Ventas por cajera</div>
+                    <table style={S.table}>
+                      <thead><tr><th style={S.th}>Cajera</th><th style={S.thC}>Ventas</th><th style={S.thR}>Total</th></tr></thead>
+                      <tbody>
+                        {repCalc.cajeras.map((c, i) => (
+                          <tr key={i}><td style={S.td}>{c.nombre}</td><td style={{ ...S.td, textAlign: "center" }}>{c.ventas}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(c.total)}</td></tr>
+                        ))}
+                      </tbody>
+                      <tfoot><tr><td style={{ ...S.td, fontWeight: 800 }}>TOTAL</td><td style={{ ...S.td, textAlign: "center", fontWeight: 800 }}>{repCalc.numVentas}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 800 }}>{money(repCalc.total)}</td></tr></tfoot>
+                    </table>
+                  </div>
+                  <div style={S.card}>
+                    <div style={S.cardTitle}>Por turno</div>
+                    <table style={S.table}>
+                      <thead><tr><th style={S.th}>Turno</th><th style={S.thC}>Ventas</th><th style={S.thR}>Total</th></tr></thead>
+                      <tbody>
+                        {repCalc.turnos.map((t, i) => {
+                          const tn = TURNOS.find((x) => x.n === t.turno);
+                          return <tr key={i}><td style={S.td}>{tn ? tn.nombre : "T" + t.turno}</td><td style={{ ...S.td, textAlign: "center" }}>{t.ventas}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(t.total)}</td></tr>;
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* === REPORTE POR ARTÍCULO === */}
+              {(repTipo === "completo" || repTipo === "articulo") && (
+                <div style={{ ...S.card, marginTop: 16 }}>
+                  <div style={S.cardTitle}>📦 Ventas por artículo</div>
                   <table style={S.table}>
-                    <thead><tr><th style={S.th}>Cajera</th><th style={S.thC}>Ventas</th><th style={S.thR}>Total</th></tr></thead>
+                    <thead><tr><th style={S.th}>Producto</th><th style={S.thC}>Unidades</th><th style={S.thR}>Importe</th></tr></thead>
                     <tbody>
-                      {repCalc.cajeras.map((c, i) => (
-                        <tr key={i}><td style={S.td}>{c.nombre}</td><td style={{ ...S.td, textAlign: "center" }}>{c.ventas}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(c.total)}</td></tr>
+                      {repCalc.productos.map((p, i) => (
+                        <tr key={i}><td style={S.td}>{p.nombre}</td><td style={{ ...S.td, textAlign: "center" }}>{p.cant}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(p.importe)}</td></tr>
                       ))}
                     </tbody>
+                    <tfoot><tr><td style={{ ...S.td, fontWeight: 800 }}>TOTAL</td><td style={{ ...S.td, textAlign: "center", fontWeight: 800 }}>{repCalc.productos.reduce((s, p) => s + p.cant, 0)}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 800 }}>{money(repCalc.productos.reduce((s, p) => s + p.importe, 0))}</td></tr></tfoot>
                   </table>
                 </div>
-                {/* Por turno */}
-                <div style={S.card}>
-                  <div style={S.cardTitle}>Por turno</div>
+              )}
+
+              {/* === REPORTE POR CORTE === */}
+              {(repTipo === "completo" || repTipo === "corte") && (
+                <div style={{ ...S.card, marginTop: 16 }}>
+                  <div style={S.cardTitle}>🗂️ Resumen de ventas por corte</div>
                   <table style={S.table}>
-                    <thead><tr><th style={S.th}>Turno</th><th style={S.thC}>Ventas</th><th style={S.thR}>Total</th></tr></thead>
+                    <thead><tr><th style={S.th}>Fecha/Hora</th><th style={S.th}>Cajera</th><th style={S.thC}>Turno</th><th style={S.thC}>Ventas</th><th style={S.thR}>Efectivo</th><th style={S.thR}>Transfer.</th><th style={S.thR}>Total</th></tr></thead>
                     <tbody>
-                      {repCalc.turnos.map((t, i) => {
-                        const tn = TURNOS.find((x) => x.n === t.turno);
-                        return <tr key={i}><td style={S.td}>{tn ? tn.nombre : "T" + t.turno}</td><td style={{ ...S.td, textAlign: "center" }}>{t.ventas}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(t.total)}</td></tr>;
+                      {repCalc.cortes.map((c, i) => {
+                        const tn = TURNOS.find((x) => x.n === c.turno);
+                        return (
+                          <tr key={i} style={{ background: c.corte_id ? "transparent" : "#FFFBEB" }}>
+                            <td style={S.td}>{String(c.primera).slice(0, 10)} {horaStr(c.primera)}{!c.corte_id && <span style={{ fontSize: 10, color: "#B45309" }}> (en curso)</span>}</td>
+                            <td style={S.td}>{c.cajera}</td>
+                            <td style={{ ...S.td, textAlign: "center" }}>{tn ? tn.corto || tn.nombre : "T" + c.turno}</td>
+                            <td style={{ ...S.td, textAlign: "center" }}>{c.ventas}</td>
+                            <td style={{ ...S.td, textAlign: "right" }}>{money(c.efectivo || 0)}</td>
+                            <td style={{ ...S.td, textAlign: "right" }}>{money(c.transferencia || 0)}</td>
+                            <td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(c.total)}</td>
+                          </tr>
+                        );
                       })}
                     </tbody>
+                    <tfoot><tr><td style={{ ...S.td, fontWeight: 800 }} colSpan={3}>TOTAL</td><td style={{ ...S.td, textAlign: "center", fontWeight: 800 }}>{repCalc.numVentas}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 800 }}>{money(repCalc.efectivo)}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 800 }}>{money(repCalc.transferencia)}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 800 }}>{money(repCalc.total)}</td></tr></tfoot>
                   </table>
+                  <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 6 }}>Cada fila es un corte de turno cerrado. Las filas en amarillo son ventas de un turno aún abierto (sin corte todavía).</div>
                 </div>
-              </div>
+              )}
 
-              {/* Por producto */}
-              <div style={{ ...S.card, marginTop: 16 }}>
-                <div style={S.cardTitle}>Por producto</div>
-                <table style={S.table}>
-                  <thead><tr><th style={S.th}>Producto</th><th style={S.thC}>Unidades</th><th style={S.thR}>Importe</th></tr></thead>
-                  <tbody>
-                    {repCalc.productos.map((p, i) => (
-                      <tr key={i}><td style={S.td}>{p.nombre}</td><td style={{ ...S.td, textAlign: "center" }}>{p.cant}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(p.importe)}</td></tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              {/* === REPORTE POR CATEGORÍA === */}
+              {(repTipo === "completo" || repTipo === "categoria") && (
+                <div style={{ ...S.card, marginTop: 16 }}>
+                  <div style={S.cardTitle}>🏷️ Resumen de ventas por categoría</div>
+                  <table style={S.table}>
+                    <thead><tr><th style={S.th}>Categoría</th><th style={S.thC}>Unidades</th><th style={S.thR}>Importe</th><th style={S.thR}>% del total</th></tr></thead>
+                    <tbody>
+                      {repCalc.categorias.map((c, i) => {
+                        const totalCat = repCalc.categorias.reduce((s, x) => s + x.importe, 0) || 1;
+                        return (
+                          <tr key={i}><td style={{ ...S.td, fontWeight: 700 }}>{c.nombre}</td><td style={{ ...S.td, textAlign: "center" }}>{c.cant}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(c.importe)}</td><td style={{ ...S.td, textAlign: "right", color: "#667" }}>{(c.importe / totalCat * 100).toFixed(1)}%</td></tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot><tr><td style={{ ...S.td, fontWeight: 800 }}>TOTAL</td><td style={{ ...S.td, textAlign: "center", fontWeight: 800 }}>{repCalc.categorias.reduce((s, c) => s + c.cant, 0)}</td><td style={{ ...S.td, textAlign: "right", fontWeight: 800 }}>{money(repCalc.categorias.reduce((s, c) => s + c.importe, 0))}</td><td style={S.td}></td></tr></tfoot>
+                  </table>
+                  <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 6 }}>Las categorías son las principales (Cerveza, Sex Shop, Venta, Condones y Lubricantes). No incluye cortesías; los combos descuentan su ahorro en su categoría.</div>
+                </div>
+              )}
 
               {/* Búsqueda por producto específico */}
+              {(repTipo === "completo" || repTipo === "articulo") && (
               <div style={{ ...S.card, marginTop: 16 }}>
                 <div style={S.cardTitle}>🔎 Ventas de un producto en el periodo</div>
                 <div className="no-print" style={{ marginBottom: 12 }}>
@@ -4114,8 +4213,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 )}
                 {!repProducto && <div style={S.emptyCart} className="no-print">Elige un producto para ver cuántos se vendieron y en qué tickets.</div>}
               </div>
+              )}
 
-              {/* Detalle de tickets */}
+              {/* Detalle de tickets (solo en reporte completo) */}
+              {repTipo === "completo" && (
               <div style={{ ...S.card, marginTop: 16 }}>
                 <div style={S.cardTitle}>Detalle de tickets ({repTickets.length})</div>
                 <table style={S.table}>
@@ -4137,6 +4238,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                   </tbody>
                 </table>
               </div>
+              )}
             </div>
           )}
         </div>
