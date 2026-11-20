@@ -48,6 +48,12 @@ const PRINCIPAL_POR_SUBCAT_NORM = Object.fromEntries(
   Object.entries(PRINCIPAL_POR_SUBCAT).map(([k, v]) => [_normCat(k), v])
 );
 const principalDeSubcat = (subcat) => PRINCIPAL_POR_SUBCAT_NORM[_normCat(subcat)] || null;
+// Nombre legible del motivo de cancelación
+const MOTIVO_CANCEL = {
+  error_captura: "Error de captura", cliente_desistio: "Cliente desistió",
+  cobro_doble: "Cobro doble", otro: "Otro",
+};
+const motivoCancelTexto = (k) => MOTIVO_CANCEL[k] || k || "—";
 
 /* ---------- Code 39 ---------- */
 const C39 = {
@@ -634,7 +640,14 @@ export default function App() {
         .eq("sucursal", sucursal).gte("fecha", desde).lte("fecha", hasta)
         .order("fecha", { ascending: true });
       if (error) throw error;
-      setRepTickets(data || []);
+      // traer también las cancelaciones del periodo para mostrar el motivo
+      const { data: canc } = await supabase.from("cancelaciones").select("*")
+        .eq("sucursal", sucursal).gte("fecha", desde).lte("fecha", hasta);
+      const motivoPorTicket = {};
+      (canc || []).forEach((c) => { motivoPorTicket[c.ticket_id] = c; });
+      const conMotivo = (data || []).map((t) => t.cancelado && motivoPorTicket[t.id]
+        ? { ...t, _cancel: motivoPorTicket[t.id] } : t);
+      setRepTickets(conMotivo);
     } catch (err) {
       setErrorMsg("No se pudo cargar el reporte: " + (err?.message || ""));
     }
@@ -4230,7 +4243,14 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                         <td style={S.td}>{String(t.fecha).slice(0, 10)} {horaStr(t.fecha)}</td>
                         <td style={S.td}>{t.habitacion || "—"}</td>
                         <td style={S.td}>{t.cajera}</td>
-                        <td style={S.td}>{t.cancelado ? "CANCELADO" : (t.metodo_pago || "efectivo")}</td>
+                        <td style={S.td}>
+                          {t.cancelado ? (
+                            <span>
+                              <b style={{ color: "#E11D48" }}>CANCELADO</b>
+                              {t._cancel && <div style={{ fontSize: 11, color: "#8A93A3" }}>Motivo: {motivoCancelTexto(t._cancel.motivo)}{t._cancel.nota ? ` — ${t._cancel.nota}` : ""}</div>}
+                            </span>
+                          ) : (t.metodo_pago || "efectivo")}
+                        </td>
                         <td style={{ ...S.td, textAlign: "right", fontWeight: 700 }}>{money(t.total)}</td>
                         <td style={{ ...S.td, textAlign: "center" }} className="no-print">
                           <button style={S.miniBtn} onClick={() => setRepTicketVista(t)}>👁 Ver</button>
@@ -4266,6 +4286,13 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               <hr style={S.hr} />
               <div style={{ ...S.tkRow, fontWeight: 800, fontSize: 16 }}><span>TOTAL</span><span>{money(repTicketVista.total)}</span></div>
               <div style={{ fontSize: 11, marginTop: 4 }}>Pago: {repTicketVista.cancelado ? "CANCELADO" : (repTicketVista.metodo_pago || "efectivo")}</div>
+              {repTicketVista.cancelado && repTicketVista._cancel && (
+                <div style={{ fontSize: 11, marginTop: 4, color: "#B91C1C" }}>
+                  Motivo cancelación: <b>{motivoCancelTexto(repTicketVista._cancel.motivo)}</b>
+                  {repTicketVista._cancel.nota ? <><br />Nota: {repTicketVista._cancel.nota}</> : null}
+                  {repTicketVista._cancel.usuario ? <><br />Canceló: {repTicketVista._cancel.usuario}</> : null}
+                </div>
+              )}
             </div>
             <div style={S.modalActions} className="no-print">
               <button style={S.ghostBtn} onClick={() => setRepTicketVista(null)}>Cerrar</button>
