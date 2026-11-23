@@ -35,6 +35,8 @@ const diasTexto = (dias) => {
 };
 // Categorías principales que agrupan las subcategorías
 const CATEGORIAS_PRINCIPALES = ["Cerveza", "Sex Shop", "Venta", "Condones y Lubricantes"];
+// Unidades de compra para productos porcionados (opciones fijas, no se teclean)
+const UNIDADES_COMPRA = ["Paquete", "Bolsa", "Kilogramo", "Gramo", "Caja", "Pieza", "Litro", "Charola", "Costal"];
 // Mapa de respaldo subcategoría → principal (por si una categoría no tiene 'principal' en la BD)
 const PRINCIPAL_POR_SUBCAT = {
   "Cervezas": "Cerveza", "Cerveza": "Cerveza",
@@ -3577,8 +3579,11 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       <input type="number" step="0.01" style={S.input} value={almForm.porciones_paquete} placeholder="5.5"
                         onChange={(e) => setAlmForm({ ...almForm, porciones_paquete: e.target.value })} /></div>
                     <div style={{ flex: 2 }}><label style={S.label}>Unidad de compra</label>
-                      <input style={S.input} value={almForm.unidad_compra} placeholder="paquete, kg, caja…"
-                        onChange={(e) => setAlmForm({ ...almForm, unidad_compra: e.target.value })} /></div>
+                      <select style={S.input} value={almForm.unidad_compra || ""}
+                        onChange={(e) => setAlmForm({ ...almForm, unidad_compra: e.target.value })}>
+                        <option value="">— Elegir —</option>
+                        {UNIDADES_COMPRA.map((u) => <option key={u} value={u}>{u}</option>)}
+                      </select></div>
                   </div>
                   <div style={{ fontSize: 12, color: "#8A93A3" }}>Este rendimiento es el valor por defecto; podrás ajustarlo en cada compra si sale distinto.</div>
 
