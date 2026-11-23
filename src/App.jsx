@@ -423,7 +423,7 @@ export default function App() {
   }, [almacen]);
 
   const nuevoAlmProducto = () =>
-    setAlmForm({ id: null, nombre: "", codigo: "", interno: false, stock: "", stock_min: "", stock_max: "", emoji: "📦", costo: "", precio_venta: "", categoria: "", porcionado: false, porciones_paquete: "", unidad_compra: "" });
+    setAlmForm({ id: null, nombre: "", codigo: "", interno: false, stock: "", stock_min: "", stock_max: "", emoji: "📦", costo: "", precio_venta: "", categoria: "", porcionado: false, porciones_paquete: "", unidad_compra: "", presentaciones: [], _presNombre: "", _presPorciones: "", _presCosto: "" });
 
   // cálculo de margen: ganancia en $ y en %
   const calcMargen = (costo, venta) => {
@@ -448,6 +448,7 @@ export default function App() {
       porcionado: !!almForm.porcionado,
       porciones_paquete: almForm.porcionado ? (parseFloat(almForm.porciones_paquete) || 0) : 0,
       unidad_compra: almForm.porcionado ? (almForm.unidad_compra || "paquete") : null,
+      presentaciones: almForm.porcionado ? (almForm.presentaciones || []) : [],
     };
     if (almForm.id) {
       const { data, error } = await supabase.from("almacen").update(p).eq("id", almForm.id).select().single();
@@ -554,28 +555,37 @@ export default function App() {
   const registrarAlmEntrada = async () => {
     const p = almResurtir.producto;
     const costoAnterior = Number(p.costo) || 0;
-    let porcionesEntran, costoNuevo, paquetes = null, porcPaq = null, costoPaq = null;
+    const stockAnterior = Number(p.stock) || 0;
+    let porcionesEntran, costoEntrada, paquetes = null, porcPaq = null, costoPaq = null;
 
     if (p.porcionado) {
-      // compra por paquete/peso: calcular porciones totales y costo por porción
+      // compra por paquete/peso: calcular porciones totales y costo por porción de ESTA compra
       paquetes = parseFloat(almResurtir.paquetes) || 0;
       porcPaq = parseFloat(almResurtir.porciones_paquete) || 0;
       costoPaq = parseFloat(almResurtir.costo_paquete) || 0;
       if (paquetes <= 0 || porcPaq <= 0) { setErrorMsg("Indica cuántos paquetes y cuántas porciones por paquete."); return; }
-      porcionesEntran = paquetes * porcPaq;                       // ej. 4 × 5.5 = 22 porciones
-      costoNuevo = costoPaq > 0 ? (costoPaq / porcPaq) : costoAnterior; // costo real por porción
+      porcionesEntran = paquetes * porcPaq;                        // ej. 4 × 5.5 = 22 porciones
+      costoEntrada = costoPaq > 0 ? (costoPaq / porcPaq) : costoAnterior; // costo por porción de esta compra
     } else {
       // producto normal: unidades enteras
       porcionesEntran = parseFloat(almResurtir.cantidad) || 0;
       if (porcionesEntran <= 0) return;
-      costoNuevo = almResurtir.costo === "" || almResurtir.costo == null ? costoAnterior : (parseFloat(almResurtir.costo) || 0);
+      costoEntrada = almResurtir.costo === "" || almResurtir.costo == null ? costoAnterior : (parseFloat(almResurtir.costo) || 0);
     }
 
+    // COSTO PROMEDIO PONDERADO: mezcla lo que ya había con lo que entra, según cantidades
+    let costoNuevo = costoEntrada;
+    if (costoEntrada > 0 && stockAnterior > 0 && costoAnterior > 0) {
+      costoNuevo = ((stockAnterior * costoAnterior) + (porcionesEntran * costoEntrada)) / (stockAnterior + porcionesEntran);
+      costoNuevo = Math.round(costoNuevo * 100) / 100; // redondear a centavos
+    } else if (costoEntrada <= 0) {
+      costoNuevo = costoAnterior; // sin costo capturado, se conserva
+    }
     const cambiaCosto = costoNuevo !== costoAnterior;
+
     // sumar stock de forma ATÓMICA (acepta decimales); el costo se actualiza aparte
     const { error } = await supabase.rpc("ajustar_stock_almacen", { p_id: p.id, p_delta: porcionesEntran });
     if (error) { setErrorMsg("No se pudo registrar: " + error.message); return; }
-    // si es porcionado, guardar también el rendimiento como nuevo valor por defecto
     const updProd = {};
     if (cambiaCosto) updProd.costo = costoNuevo;
     if (p.porcionado && porcPaq > 0 && porcPaq !== Number(p.porciones_paquete)) updProd.porciones_paquete = porcPaq;
@@ -583,9 +593,10 @@ export default function App() {
 
     const ent = {
       producto_id: p.id, nombre: p.nombre, codigo: p.codigo, cantidad: porcionesEntran,
-      stock_anterior: Number(p.stock), stock_nuevo: Number(p.stock) + porcionesEntran,
+      stock_anterior: stockAnterior, stock_nuevo: stockAnterior + porcionesEntran,
       costo_unitario: costoNuevo, costo_anterior: costoAnterior, precio_venta: Number(p.precio_venta) || 0,
       paquetes, porciones_paquete: porcPaq, costo_paquete: costoPaq,
+      presentacion: almResurtir.presentacion || null,
       usuario: perfil.nombre, nota: almResurtir.nota || "",
     };
     const { data } = await supabase.from("almacen_entradas").insert(ent).select().single();
@@ -3338,10 +3349,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       🔀 Traspasar
                     </button>{" "}
                     <button style={{ ...S.miniBtn, borderColor: "#0E9F6E", color: "#0E9F6E", fontWeight: 700 }}
-                      onClick={() => setAlmResurtir({ producto: p, cantidad: p.stock_max > p.stock ? String(p.stock_max - p.stock) : "", costo: "", nota: "", paquetes: "", porciones_paquete: String(p.porciones_paquete || ""), costo_paquete: "" })}>
+                      onClick={() => setAlmResurtir({ producto: p, cantidad: p.stock_max > p.stock ? String(p.stock_max - p.stock) : "", costo: "", nota: "", paquetes: "", porciones_paquete: String(p.porciones_paquete || ""), costo_paquete: "", presentacion: "" })}>
                       📥 Entrada
                     </button>{" "}
-                    <button style={S.miniBtn} onClick={() => setAlmForm({ ...p, stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || ""), costo: String(p.costo || ""), precio_venta: String(p.precio_venta || ""), porcionado: !!p.porcionado, porciones_paquete: String(p.porciones_paquete || ""), unidad_compra: p.unidad_compra || "" })}>✏️</button>{" "}
+                    <button style={S.miniBtn} onClick={() => setAlmForm({ ...p, stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || ""), costo: String(p.costo || ""), precio_venta: String(p.precio_venta || ""), porcionado: !!p.porcionado, porciones_paquete: String(p.porciones_paquete || ""), unidad_compra: p.unidad_compra || "", presentaciones: p.presentaciones || [], _presNombre: "", _presPorciones: "", _presCosto: "" })}>✏️</button>{" "}
                     <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }}
                       onClick={() => setDarBaja({ producto: p, cantidad: "", motivo: "", nota: "" })}>
                       ⬇️ Baja
@@ -3570,6 +3581,47 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                         onChange={(e) => setAlmForm({ ...almForm, unidad_compra: e.target.value })} /></div>
                   </div>
                   <div style={{ fontSize: 12, color: "#8A93A3" }}>Este rendimiento es el valor por defecto; podrás ajustarlo en cada compra si sale distinto.</div>
+
+                  {/* Catálogo de presentaciones de compra */}
+                  <div style={{ marginTop: 12, borderTop: "1px dashed #D7DCE5", paddingTop: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: "#14213D", marginBottom: 2 }}>📦 Presentaciones de compra</div>
+                    <div style={{ fontSize: 12, color: "#8A6D00", marginBottom: 8 }}>
+                      Guarda las formas en que compras este producto (ej. «Bolsa 1.36 kg» = 5.5 porciones; «Bolsa 10 porciones» = 10). Al registrar una compra solo eliges cuál llegó. Todas suman al mismo stock de porciones.
+                    </div>
+                    {(almForm.presentaciones || []).length > 0 && (
+                      <div style={{ border: "1px solid #E5E8EE", borderRadius: 8, padding: 8, marginBottom: 8 }}>
+                        {(almForm.presentaciones || []).map((pr, i) => (
+                          <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 13 }}>
+                            <span style={{ flex: 1, fontWeight: 600 }}>{pr.nombre}</span>
+                            <span style={{ color: "#455" }}>{pr.porciones} porc.</span>
+                            {pr.costo > 0 && <span style={{ color: "#0E7A4F" }}>· {money(pr.costo)}</span>}
+                            <button style={S.delBtn} onClick={() => setAlmForm({ ...almForm, presentaciones: almForm.presentaciones.filter((_, j) => j !== i) })}>✕</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div style={S.formRow}>
+                      <div style={{ flex: 3 }}><label style={S.label}>Nombre presentación</label>
+                        <input style={S.input} value={almForm._presNombre || ""} placeholder="Bolsa 10 porciones"
+                          onChange={(e) => setAlmForm({ ...almForm, _presNombre: e.target.value })} /></div>
+                      <div style={{ flex: 2 }}><label style={S.label}>Porciones que rinde</label>
+                        <input type="number" step="0.01" style={S.input} value={almForm._presPorciones || ""} placeholder="10"
+                          onChange={(e) => setAlmForm({ ...almForm, _presPorciones: e.target.value })} /></div>
+                      <div style={{ flex: 2 }}><label style={S.label}>Costo típico $</label>
+                        <input type="number" step="0.01" style={S.input} value={almForm._presCosto || ""} placeholder="600"
+                          onChange={(e) => setAlmForm({ ...almForm, _presCosto: e.target.value })} /></div>
+                    </div>
+                    <button style={{ ...S.ghostBtn, marginTop: 6 }}
+                      onClick={() => {
+                        const nombre = (almForm._presNombre || "").trim();
+                        const porciones = parseFloat(almForm._presPorciones) || 0;
+                        if (!nombre || porciones <= 0) { setErrorMsg("Para agregar una presentación: nombre y porciones."); return; }
+                        const nueva = { nombre, porciones, costo: parseFloat(almForm._presCosto) || 0 };
+                        setAlmForm({ ...almForm, presentaciones: [...(almForm.presentaciones || []), nueva], _presNombre: "", _presPorciones: "", _presCosto: "" });
+                      }}>
+                      ＋ Agregar presentación
+                    </button>
+                  </div>
                 </>
               )}
             </div>
@@ -3605,8 +3657,25 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
               /* ====== ENTRADA DE PRODUCTO PORCIONADO ====== */
               <>
                 <div style={{ background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 10, padding: "10px 12px", fontSize: 13, marginBottom: 10 }}>
-                  🍽️ Producto porcionado. Captura cuántos paquetes compraste, cuántas porciones rinde cada uno y cuánto costó cada paquete. El sistema calcula las porciones y el costo por porción.
+                  🍽️ Producto porcionado. Elige la presentación que llegó (o captura los datos a mano). El sistema calcula las porciones y el costo por porción, y actualiza el costo promedio.
                 </div>
+                {(almResurtir.producto.presentaciones || []).length > 0 && (
+                  <div style={{ marginBottom: 10 }}>
+                    <label style={S.label}>Presentación que llegó</label>
+                    <select style={S.input} value={almResurtir.presentacion || ""}
+                      onChange={(e) => {
+                        const pr = (almResurtir.producto.presentaciones || []).find((x) => x.nombre === e.target.value);
+                        if (pr) setAlmResurtir({ ...almResurtir, presentacion: pr.nombre, porciones_paquete: String(pr.porciones), costo_paquete: pr.costo ? String(pr.costo) : almResurtir.costo_paquete });
+                        else setAlmResurtir({ ...almResurtir, presentacion: "" });
+                      }}>
+                      <option value="">— Elegir presentación guardada —</option>
+                      {(almResurtir.producto.presentaciones || []).map((pr, i) => (
+                        <option key={i} value={pr.nombre}>{pr.nombre} ({pr.porciones} porc.{pr.costo > 0 ? ` · ${money(pr.costo)}` : ""})</option>
+                      ))}
+                    </select>
+                    <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 3 }}>Al elegir una, se rellenan las porciones y el costo (los puedes ajustar si esta compra salió distinta).</div>
+                  </div>
+                )}
                 <div style={S.formRow}>
                   <div style={{ flex: 1 }}>
                     <label style={S.label}>Paquetes comprados *</label>
@@ -3635,19 +3704,28 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                   if (paq <= 0 || pp <= 0) return null;
                   const porciones = paq * pp;
                   const costoPorcion = cp > 0 ? cp / pp : 0;
-                  const m = calcMargen(costoPorcion, almResurtir.producto.precio_venta);
+                  // costo promedio ponderado con lo que ya hay
+                  const stkAnt = Number(almResurtir.producto.stock) || 0;
+                  const costoAnt = Number(almResurtir.producto.costo) || 0;
+                  let costoProm = costoPorcion;
+                  if (costoPorcion > 0 && stkAnt > 0 && costoAnt > 0)
+                    costoProm = Math.round(((stkAnt * costoAnt) + (porciones * costoPorcion)) / (stkAnt + porciones) * 100) / 100;
+                  const m = calcMargen(costoProm, almResurtir.producto.precio_venta);
                   return (
                     <div style={{ background: "#F0FDF4", border: "1px solid #6EE7B7", borderRadius: 10, padding: "12px 14px", marginBottom: 8 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15 }}>
                         <span>Entran al almacén:</span><b>{porciones} porciones</b>
                       </div>
                       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, marginTop: 4 }}>
-                        <span>Nuevo stock:</span><b>{Number(almResurtir.producto.stock) + porciones} porciones</b>
+                        <span>Nuevo stock:</span><b>{stkAnt + porciones} porciones</b>
                       </div>
                       {cp > 0 && (
                         <>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginTop: 4, color: "#667" }}>
+                            <span>Costo de esta compra:</span><b>{money(costoPorcion)} / porción</b>
+                          </div>
                           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, marginTop: 4 }}>
-                            <span>Costo real por porción:</span><b>{money(costoPorcion)}</b>
+                            <span>Costo promedio nuevo:</span><b>{money(costoProm)} / porción</b>
                           </div>
                           {(parseFloat(almResurtir.producto.precio_venta) || 0) > 0 && (
                             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginTop: 4, color: m.ganancia >= 0 ? "#0E7A4F" : "#E11D48" }}>
