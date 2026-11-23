@@ -423,7 +423,7 @@ export default function App() {
   }, [almacen]);
 
   const nuevoAlmProducto = () =>
-    setAlmForm({ id: null, nombre: "", codigo: "", interno: false, stock: "", stock_min: "", stock_max: "", emoji: "📦", costo: "", precio_venta: "", categoria: "" });
+    setAlmForm({ id: null, nombre: "", codigo: "", interno: false, stock: "", stock_min: "", stock_max: "", emoji: "📦", costo: "", precio_venta: "", categoria: "", porcionado: false, porciones_paquete: "", unidad_compra: "" });
 
   // cálculo de margen: ganancia en $ y en %
   const calcMargen = (costo, venta) => {
@@ -439,12 +439,15 @@ export default function App() {
     if (!codigo) { codigo = String(almSiguienteInterno); interno = true; }
     const p = {
       nombre: almForm.nombre.trim(), codigo, interno,
-      stock: parseInt(almForm.stock) || 0,
-      stock_min: parseInt(almForm.stock_min) || 0, stock_max: parseInt(almForm.stock_max) || 0,
+      stock: parseFloat(almForm.stock) || 0,
+      stock_min: parseFloat(almForm.stock_min) || 0, stock_max: parseFloat(almForm.stock_max) || 0,
       emoji: almForm.emoji || "📦",
       costo: parseFloat(almForm.costo) || 0,
       precio_venta: parseFloat(almForm.precio_venta) || 0,
       categoria: almForm.categoria || null,
+      porcionado: !!almForm.porcionado,
+      porciones_paquete: almForm.porcionado ? (parseFloat(almForm.porciones_paquete) || 0) : 0,
+      unidad_compra: almForm.porcionado ? (almForm.unidad_compra || "paquete") : null,
     };
     if (almForm.id) {
       const { data, error } = await supabase.from("almacen").update(p).eq("id", almForm.id).select().single();
@@ -549,32 +552,51 @@ export default function App() {
   };
 
   const registrarAlmEntrada = async () => {
-    const cant = parseInt(almResurtir.cantidad) || 0;
-    if (cant <= 0) return;
     const p = almResurtir.producto;
-    // costo con el que llegó esta compra (si lo dejan vacío, se conserva el costo actual)
     const costoAnterior = Number(p.costo) || 0;
-    const costoNuevo = almResurtir.costo === "" || almResurtir.costo == null ? costoAnterior : (parseFloat(almResurtir.costo) || 0);
+    let porcionesEntran, costoNuevo, paquetes = null, porcPaq = null, costoPaq = null;
+
+    if (p.porcionado) {
+      // compra por paquete/peso: calcular porciones totales y costo por porción
+      paquetes = parseFloat(almResurtir.paquetes) || 0;
+      porcPaq = parseFloat(almResurtir.porciones_paquete) || 0;
+      costoPaq = parseFloat(almResurtir.costo_paquete) || 0;
+      if (paquetes <= 0 || porcPaq <= 0) { setErrorMsg("Indica cuántos paquetes y cuántas porciones por paquete."); return; }
+      porcionesEntran = paquetes * porcPaq;                       // ej. 4 × 5.5 = 22 porciones
+      costoNuevo = costoPaq > 0 ? (costoPaq / porcPaq) : costoAnterior; // costo real por porción
+    } else {
+      // producto normal: unidades enteras
+      porcionesEntran = parseFloat(almResurtir.cantidad) || 0;
+      if (porcionesEntran <= 0) return;
+      costoNuevo = almResurtir.costo === "" || almResurtir.costo == null ? costoAnterior : (parseFloat(almResurtir.costo) || 0);
+    }
+
     const cambiaCosto = costoNuevo !== costoAnterior;
-    // sumar stock de forma ATÓMICA; el costo (si cambió) se actualiza aparte
-    const { error } = await supabase.rpc("ajustar_stock_almacen", { p_id: p.id, p_delta: cant });
+    // sumar stock de forma ATÓMICA (acepta decimales); el costo se actualiza aparte
+    const { error } = await supabase.rpc("ajustar_stock_almacen", { p_id: p.id, p_delta: porcionesEntran });
     if (error) { setErrorMsg("No se pudo registrar: " + error.message); return; }
-    if (cambiaCosto) await supabase.from("almacen").update({ costo: costoNuevo }).eq("id", p.id);
+    // si es porcionado, guardar también el rendimiento como nuevo valor por defecto
+    const updProd = {};
+    if (cambiaCosto) updProd.costo = costoNuevo;
+    if (p.porcionado && porcPaq > 0 && porcPaq !== Number(p.porciones_paquete)) updProd.porciones_paquete = porcPaq;
+    if (Object.keys(updProd).length) await supabase.from("almacen").update(updProd).eq("id", p.id);
+
     const ent = {
-      producto_id: p.id, nombre: p.nombre, codigo: p.codigo, cantidad: cant,
-      stock_anterior: p.stock, stock_nuevo: p.stock + cant,
+      producto_id: p.id, nombre: p.nombre, codigo: p.codigo, cantidad: porcionesEntran,
+      stock_anterior: Number(p.stock), stock_nuevo: Number(p.stock) + porcionesEntran,
       costo_unitario: costoNuevo, costo_anterior: costoAnterior, precio_venta: Number(p.precio_venta) || 0,
+      paquetes, porciones_paquete: porcPaq, costo_paquete: costoPaq,
       usuario: perfil.nombre, nota: almResurtir.nota || "",
     };
     const { data } = await supabase.from("almacen_entradas").insert(ent).select().single();
-    setAlmacen((xs) => xs.map((x) => (x.id === p.id ? { ...x, stock: x.stock + cant, ...(cambiaCosto ? { costo: costoNuevo } : {}) } : x)));
+    setAlmacen((xs) => xs.map((x) => (x.id === p.id ? { ...x, stock: Number(x.stock) + porcionesEntran, ...updProd } : x)));
     if (data) setAlmacenEntradas((es) => [data, ...es]);
     setAlmResurtir(null);
   };
 
   const ejecutarTraspaso = async () => {
     setErrorMsg("");
-    const cant = parseInt(traspasar.cantidad) || 0;
+    const cant = parseFloat(traspasar.cantidad) || 0;
     const p = traspasar.producto;
     const suc = traspasar.sucursal;
     if (cant <= 0) return;
@@ -3316,10 +3338,10 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                       🔀 Traspasar
                     </button>{" "}
                     <button style={{ ...S.miniBtn, borderColor: "#0E9F6E", color: "#0E9F6E", fontWeight: 700 }}
-                      onClick={() => setAlmResurtir({ producto: p, cantidad: p.stock_max > p.stock ? String(p.stock_max - p.stock) : "", costo: "", nota: "" })}>
+                      onClick={() => setAlmResurtir({ producto: p, cantidad: p.stock_max > p.stock ? String(p.stock_max - p.stock) : "", costo: "", nota: "", paquetes: "", porciones_paquete: String(p.porciones_paquete || ""), costo_paquete: "" })}>
                       📥 Entrada
                     </button>{" "}
-                    <button style={S.miniBtn} onClick={() => setAlmForm({ ...p, stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || ""), costo: String(p.costo || ""), precio_venta: String(p.precio_venta || "") })}>✏️</button>{" "}
+                    <button style={S.miniBtn} onClick={() => setAlmForm({ ...p, stock: String(p.stock), stock_min: String(p.stock_min), stock_max: String(p.stock_max || ""), costo: String(p.costo || ""), precio_venta: String(p.precio_venta || ""), porcionado: !!p.porcionado, porciones_paquete: String(p.porciones_paquete || ""), unidad_compra: p.unidad_compra || "" })}>✏️</button>{" "}
                     <button style={{ ...S.miniBtn, borderColor: "#E11D48", color: "#E11D48", fontWeight: 700 }}
                       onClick={() => setDarBaja({ producto: p, cantidad: "", motivo: "", nota: "" })}>
                       ⬇️ Baja
@@ -3528,6 +3550,30 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 </div>
               );
             })()}
+            {/* Producto porcionado (se compra por paquete/peso, se vende por porción) */}
+            <div style={{ border: "1px solid #E5E8EE", borderRadius: 10, padding: "10px 12px", marginTop: 10, background: almForm.porcionado ? "#FFFBEB" : "transparent" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+                <input type="checkbox" checked={!!almForm.porcionado} onChange={(e) => setAlmForm({ ...almForm, porcionado: e.target.checked })} />
+                🍽️ Producto porcionado (se compra por paquete/peso y se vende por porción)
+              </label>
+              {almForm.porcionado && (
+                <>
+                  <div style={{ fontSize: 12, color: "#8A6D00", margin: "6px 0 8px" }}>
+                    Ej. alitas: un paquete de 1.36 kg rinde 5.5 porciones. O boneless: un paquete de 40 piezas a 8 piezas por porción = 5 porciones. La existencia se lleva en porciones (admite decimales, se van acumulando entre paquetes).
+                  </div>
+                  <div style={S.formRow}>
+                    <div style={{ flex: 2 }}><label style={S.label}>Porciones por paquete *</label>
+                      <input type="number" step="0.01" style={S.input} value={almForm.porciones_paquete} placeholder="5.5"
+                        onChange={(e) => setAlmForm({ ...almForm, porciones_paquete: e.target.value })} /></div>
+                    <div style={{ flex: 2 }}><label style={S.label}>Unidad de compra</label>
+                      <input style={S.input} value={almForm.unidad_compra} placeholder="paquete, kg, caja…"
+                        onChange={(e) => setAlmForm({ ...almForm, unidad_compra: e.target.value })} /></div>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#8A93A3" }}>Este rendimiento es el valor por defecto; podrás ajustarlo en cada compra si sale distinto.</div>
+                </>
+              )}
+            </div>
+
             <label style={S.label}>Categoría</label>
             <select style={S.input} value={almForm.categoria || ""} onChange={(e) => setAlmForm({ ...almForm, categoria: e.target.value })}>
               <option value="">— Sin categoría —</option>
@@ -3550,48 +3596,119 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
           <div style={S.modal}>
             <div style={S.modalTitle}>📥 Entrada al almacén: {almResurtir.producto.nombre}</div>
             <div style={{ fontSize: 14, marginBottom: 6 }}>
-              En almacén ahora: <b>{almResurtir.producto.stock}</b> ·
-              Costo actual: <b>{money(almResurtir.producto.costo)}</b> ·
+              En almacén ahora: <b>{Number(almResurtir.producto.stock)}</b> {almResurtir.producto.porcionado ? "porciones" : ""} ·
+              Costo actual: <b>{money(almResurtir.producto.costo)}</b>{almResurtir.producto.porcionado ? " / porción" : ""} ·
               P. Venta: <b>{money(almResurtir.producto.precio_venta)}</b>
             </div>
-            <div style={S.formRow}>
-              <div style={{ flex: 1 }}>
-                <label style={S.label}>Cantidad que entra *</label>
-                <input type="number" style={S.bigInput} value={almResurtir.cantidad} autoFocus
-                  onChange={(e) => setAlmResurtir({ ...almResurtir, cantidad: e.target.value })}
-                  onKeyDown={(e) => e.key === "Enter" && registrarAlmEntrada()} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <label style={S.label}>Costo unitario de esta compra</label>
-                <input type="number" style={S.bigInput}
-                  value={almResurtir.costo}
-                  placeholder={String(almResurtir.producto.costo || 0)}
-                  onChange={(e) => setAlmResurtir({ ...almResurtir, costo: e.target.value })} />
-              </div>
-            </div>
-            {/* aviso de cambio de costo y margen resultante */}
-            {almResurtir.costo !== "" && parseFloat(almResurtir.costo) !== (Number(almResurtir.producto.costo) || 0) && (() => {
-              const nuevoCosto = parseFloat(almResurtir.costo) || 0;
-              const m = calcMargen(nuevoCosto, almResurtir.producto.precio_venta);
-              const subio = nuevoCosto > (Number(almResurtir.producto.costo) || 0);
-              return (
-                <div style={{ background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 10, padding: "10px 12px", fontSize: 13, marginBottom: 6 }}>
-                  <div>El costo {subio ? "sube" : "baja"} de <b>{money(almResurtir.producto.costo)}</b> a <b>{money(nuevoCosto)}</b>.</div>
-                  <div style={{ marginTop: 2 }}>
-                    Margen con el precio de venta actual ({money(almResurtir.producto.precio_venta)}):{" "}
-                    <b style={{ color: m.ganancia >= 0 ? "#0E9F6E" : "#E11D48" }}>{money(m.ganancia)} ({m.pct.toFixed(0)}%)</b>
-                  </div>
-                  <div style={{ color: "#8A6D00", marginTop: 2 }}>El precio de venta NO se cambia. Si quieres ajustarlo, edita el producto (✏️) después.</div>
+
+            {almResurtir.producto.porcionado ? (
+              /* ====== ENTRADA DE PRODUCTO PORCIONADO ====== */
+              <>
+                <div style={{ background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 10, padding: "10px 12px", fontSize: 13, marginBottom: 10 }}>
+                  🍽️ Producto porcionado. Captura cuántos paquetes compraste, cuántas porciones rinde cada uno y cuánto costó cada paquete. El sistema calcula las porciones y el costo por porción.
                 </div>
-              );
-            })()}
-            <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 4 }}>Deja el costo vacío si llegó al mismo precio de siempre.</div>
+                <div style={S.formRow}>
+                  <div style={{ flex: 1 }}>
+                    <label style={S.label}>Paquetes comprados *</label>
+                    <input type="number" step="0.01" style={S.bigInput} value={almResurtir.paquetes} autoFocus
+                      placeholder="4"
+                      onChange={(e) => setAlmResurtir({ ...almResurtir, paquetes: e.target.value })} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={S.label}>Porciones por paquete *</label>
+                    <input type="number" step="0.01" style={S.bigInput} value={almResurtir.porciones_paquete}
+                      placeholder={String(almResurtir.producto.porciones_paquete || "5.5")}
+                      onChange={(e) => setAlmResurtir({ ...almResurtir, porciones_paquete: e.target.value })} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={S.label}>Costo por paquete $ *</label>
+                    <input type="number" step="0.01" style={S.bigInput} value={almResurtir.costo_paquete}
+                      placeholder="340"
+                      onChange={(e) => setAlmResurtir({ ...almResurtir, costo_paquete: e.target.value })} />
+                  </div>
+                </div>
+                {/* cálculo en vivo */}
+                {(() => {
+                  const paq = parseFloat(almResurtir.paquetes) || 0;
+                  const pp = parseFloat(almResurtir.porciones_paquete) || 0;
+                  const cp = parseFloat(almResurtir.costo_paquete) || 0;
+                  if (paq <= 0 || pp <= 0) return null;
+                  const porciones = paq * pp;
+                  const costoPorcion = cp > 0 ? cp / pp : 0;
+                  const m = calcMargen(costoPorcion, almResurtir.producto.precio_venta);
+                  return (
+                    <div style={{ background: "#F0FDF4", border: "1px solid #6EE7B7", borderRadius: 10, padding: "12px 14px", marginBottom: 8 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15 }}>
+                        <span>Entran al almacén:</span><b>{porciones} porciones</b>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, marginTop: 4 }}>
+                        <span>Nuevo stock:</span><b>{Number(almResurtir.producto.stock) + porciones} porciones</b>
+                      </div>
+                      {cp > 0 && (
+                        <>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, marginTop: 4 }}>
+                            <span>Costo real por porción:</span><b>{money(costoPorcion)}</b>
+                          </div>
+                          {(parseFloat(almResurtir.producto.precio_venta) || 0) > 0 && (
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginTop: 4, color: m.ganancia >= 0 ? "#0E7A4F" : "#E11D48" }}>
+                              <span>Ganancia por porción:</span><b>{money(m.ganancia)} ({m.pct.toFixed(0)}%)</b>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
+              </>
+            ) : (
+              /* ====== ENTRADA NORMAL (unidades) ====== */
+              <>
+                <div style={S.formRow}>
+                  <div style={{ flex: 1 }}>
+                    <label style={S.label}>Cantidad que entra *</label>
+                    <input type="number" style={S.bigInput} value={almResurtir.cantidad} autoFocus
+                      onChange={(e) => setAlmResurtir({ ...almResurtir, cantidad: e.target.value })}
+                      onKeyDown={(e) => e.key === "Enter" && registrarAlmEntrada()} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={S.label}>Costo unitario de esta compra</label>
+                    <input type="number" style={S.bigInput}
+                      value={almResurtir.costo}
+                      placeholder={String(almResurtir.producto.costo || 0)}
+                      onChange={(e) => setAlmResurtir({ ...almResurtir, costo: e.target.value })} />
+                  </div>
+                </div>
+                {almResurtir.costo !== "" && parseFloat(almResurtir.costo) !== (Number(almResurtir.producto.costo) || 0) && (() => {
+                  const nuevoCosto = parseFloat(almResurtir.costo) || 0;
+                  const m = calcMargen(nuevoCosto, almResurtir.producto.precio_venta);
+                  const subio = nuevoCosto > (Number(almResurtir.producto.costo) || 0);
+                  return (
+                    <div style={{ background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 10, padding: "10px 12px", fontSize: 13, marginBottom: 6 }}>
+                      <div>El costo {subio ? "sube" : "baja"} de <b>{money(almResurtir.producto.costo)}</b> a <b>{money(nuevoCosto)}</b>.</div>
+                      <div style={{ marginTop: 2 }}>
+                        Margen con el precio de venta actual ({money(almResurtir.producto.precio_venta)}):{" "}
+                        <b style={{ color: m.ganancia >= 0 ? "#0E9F6E" : "#E11D48" }}>{money(m.ganancia)} ({m.pct.toFixed(0)}%)</b>
+                      </div>
+                      <div style={{ color: "#8A6D00", marginTop: 2 }}>El precio de venta NO se cambia. Si quieres ajustarlo, edita el producto (✏️) después.</div>
+                    </div>
+                  );
+                })()}
+                <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 4 }}>Deja el costo vacío si llegó al mismo precio de siempre.</div>
+              </>
+            )}
+
             <label style={S.label}>Nota (proveedor, factura…)</label>
             <input style={S.input} value={almResurtir.nota} onChange={(e) => setAlmResurtir({ ...almResurtir, nota: e.target.value })} />
             <div style={S.modalActions}>
               <button style={S.ghostBtn} onClick={() => setAlmResurtir(null)}>Cancelar</button>
-              <button style={{ ...S.payBtn, opacity: parseInt(almResurtir.cantidad) > 0 ? 1 : 0.4 }}
-                disabled={!(parseInt(almResurtir.cantidad) > 0)} onClick={registrarAlmEntrada}>💾 Registrar entrada</button>
+              {(() => {
+                const ok = almResurtir.producto.porcionado
+                  ? (parseFloat(almResurtir.paquetes) > 0 && parseFloat(almResurtir.porciones_paquete) > 0)
+                  : (parseFloat(almResurtir.cantidad) > 0);
+                return (
+                  <button style={{ ...S.payBtn, opacity: ok ? 1 : 0.4 }} disabled={!ok} onClick={registrarAlmEntrada}>💾 Registrar entrada</button>
+                );
+              })()}
             </div>
           </div>
         </div>
@@ -3613,13 +3730,13 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                   onClick={() => setTraspasar({ ...traspasar, sucursal: k })}>{s.corto}</button>
               ))}
             </div>
-            <label style={S.label}>Cantidad a traspasar *</label>
-            <input type="number" style={S.bigInput} value={traspasar.cantidad} autoFocus
+            <label style={S.label}>Cantidad a traspasar *{traspasar.producto.porcionado ? " (porciones)" : ""}</label>
+            <input type="number" step={traspasar.producto.porcionado ? "0.5" : "1"} style={S.bigInput} value={traspasar.cantidad} autoFocus
               onChange={(e) => setTraspasar({ ...traspasar, cantidad: e.target.value })}
               onKeyDown={(e) => e.key === "Enter" && ejecutarTraspaso()} />
-            {parseInt(traspasar.cantidad) > 0 && (
-              <div style={{ fontSize: 13, marginTop: 6, color: parseInt(traspasar.cantidad) > traspasar.producto.stock ? "#E11D48" : "#455" }}>
-                Quedarán <b>{traspasar.producto.stock - (parseInt(traspasar.cantidad) || 0)}</b> u en el almacén.
+            {parseFloat(traspasar.cantidad) > 0 && (
+              <div style={{ fontSize: 13, marginTop: 6, color: parseFloat(traspasar.cantidad) > traspasar.producto.stock ? "#E11D48" : "#455" }}>
+                Quedarán <b>{traspasar.producto.stock - (parseFloat(traspasar.cantidad) || 0)}</b> u en el almacén.
               </div>
             )}
             <div style={{ fontSize: 12, color: "#8A93A3", marginTop: 8 }}>
@@ -3627,8 +3744,8 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             </div>
             <div style={S.modalActions}>
               <button style={S.ghostBtn} onClick={() => setTraspasar(null)}>Cancelar</button>
-              <button style={{ ...S.payBtn, opacity: (parseInt(traspasar.cantidad) > 0 && traspasar.sucursal) ? 1 : 0.4 }}
-                disabled={!(parseInt(traspasar.cantidad) > 0 && traspasar.sucursal)} onClick={ejecutarTraspaso}>
+              <button style={{ ...S.payBtn, opacity: (parseFloat(traspasar.cantidad) > 0 && traspasar.sucursal) ? 1 : 0.4 }}
+                disabled={!(parseFloat(traspasar.cantidad) > 0 && traspasar.sucursal)} onClick={ejecutarTraspaso}>
                 🔀 Confirmar traspaso
               </button>
             </div>
