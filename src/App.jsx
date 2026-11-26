@@ -819,7 +819,7 @@ export default function App() {
       const [t, p, co] = await Promise.all([
         supabase.from("tickets").select("*").eq("sucursal", suc).gte("fecha", desde).order("fecha", { ascending: false }),
         supabase.from("productos").select("id,nombre,stock,stock_min").eq("sucursal", suc),
-        supabase.from("cortes").select("fecha,turno,cajera,total").eq("sucursal", suc).order("fecha", { ascending: false }).limit(3),
+        supabase.from("cortes").select("fecha,turno,cajera,total,abierto_en").eq("sucursal", suc).order("fecha", { ascending: false }).limit(3),
       ]);
       const validos = (t.data || []).filter((x) => !x.cancelado);
       const porM = (m) => validos.filter((x) => (x.metodo_pago || "efectivo") === m).reduce((s, x) => s + Number(x.total), 0);
@@ -1261,9 +1261,16 @@ export default function App() {
     const lista = pend || [];
     const validos = lista.filter((t) => !t.cancelado);
     const porMetodo = (m) => validos.filter((t) => (t.metodo_pago || "efectivo") === m).reduce((s, t) => s + Number(t.total), 0);
+    // datos del turno abierto: hora de apertura y el TURNO con que se abrió.
+    // Usamos ese turno (no el de la hora de cierre) para que quede bien
+    // identificado — ej. quien abre a las 11pm es T3 aunque cierre a las 7am.
+    const { data: tAbierto } = await supabase.from("turnos_abiertos").select("created_at,turno").eq("sucursal", sucursal).maybeSingle();
+    const aperturaTurno = tAbierto?.created_at || null;
+    const turnoDelCorte = tAbierto?.turno || turnoActual();
     // Objeto del corte calculado (todavía sin guardar en la base)
     const corte = {
-      sucursal, turno: turnoActual(), cajera: perfil.nombre, fecha: new Date().toISOString(),
+      sucursal, turno: turnoDelCorte, cajera: perfil.nombre, fecha: new Date().toISOString(),
+      abierto_en: aperturaTurno,
       total: validos.reduce((s, t) => s + Number(t.total), 0),
       total_efectivo: porMetodo("efectivo"),
       total_transferencia: porMetodo("transferencia"),
@@ -2367,11 +2374,21 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                         </div>
                       ))}
                       <div style={{ ...S.kpiLabel, marginTop: 10 }}>Últimos cortes</div>
-                      {m.cortes.map((c, i) => (
-                        <div key={i} style={{ ...S.corteRow, fontSize: 13 }}>
-                          <span>{fechaLarga(c.fecha)} · T{c.turno} · {c.cajera}</span><b>{money(c.total)}</b>
-                        </div>
-                      ))}
+                      <div style={{ fontSize: 11, color: "#8A93A3", marginBottom: 4 }}>Cada corte muestra el periodo real que cubrió: apertura → cierre.</div>
+                      {m.cortes.map((c, i) => {
+                        const tn = TURNOS.find((x) => x.n === c.turno);
+                        return (
+                          <div key={i} style={{ ...S.corteRow, fontSize: 13 }}>
+                            <span>
+                              {c.cajera} · <b>{tn ? tn.nombre : "T" + c.turno}</b><br />
+                              <span style={{ fontSize: 11, color: "#667" }}>
+                                {c.abierto_en ? `Abrió ${fechaLarga(c.abierto_en)} → ` : ""}Cerró {fechaLarga(c.fecha)}
+                              </span>
+                            </span>
+                            <b>{money(c.total)}</b>
+                          </div>
+                        );
+                      })}
                     </>
                   )}
                 </div>
@@ -2689,7 +2706,18 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                 }}
                 onClick={() => {
                   if (procesando) return;
-                  if (window.confirm("¿Estás segura? Esta acción CIERRA el turno, lo registra y libera la caja. No se puede deshacer.")) {
+                  // Candado anti-corte-vacío: evita los cortes de $0 por doble clic.
+                  // Si no hay NINGUNA venta pendiente y quien cierra es una cajera,
+                  // no la dejamos generar un corte en blanco. Un admin sí puede
+                  // forzarlo para un turno genuino sin ventas.
+                  if (cortePrevia._sinVentas && !esAdmin) {
+                    window.alert("⛔ No hay ventas nuevas para cortar.\n\nEs posible que el corte ya se haya hecho hace un momento. Revisa tu resumen antes de volver a cortar. Si de verdad el turno fue sin ventas, pide a un administrador que lo cierre.");
+                    return;
+                  }
+                  const aviso = cortePrevia._sinVentas
+                    ? "⚠️ Este corte NO tiene ventas (quedará en $0). ¿Seguro que quieres registrarlo así?"
+                    : "¿Estás segura? Esta acción CIERRA el turno, lo registra y libera la caja. No se puede deshacer.";
+                  if (window.confirm(aviso)) {
                     ejecutarCorte();
                   }
                 }}
