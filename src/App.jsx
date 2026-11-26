@@ -187,6 +187,7 @@ export default function App() {
   const [repTicketVista, setRepTicketVista] = useState(null); // ticket que se ve/imprime
   const [repProducto, setRepProducto] = useState(""); // producto elegido para el reporte por producto (código)
   const [repTipo, setRepTipo] = useState("completo"); // tipo de reporte: cajera|articulo|corte|categoria|completo
+  const [repAtajo, setRepAtajo] = useState(""); // atajo de fecha activo: hoy|ayer|semana|mes
   const [turnosAbiertos, setTurnosAbiertos] = useState([]);
   const [mermaModal, setMermaModal] = useState(null); // {producto?, cantidad, momento, nota}
   const [mermasPos, setMermasPos] = useState([]);
@@ -695,6 +696,7 @@ export default function App() {
     else if (tipo === "ayer") { const a = new Date(hoy); a.setDate(a.getDate() - 1); setRepDesde(d(a)); setRepHasta(d(a)); }
     else if (tipo === "semana") { const a = new Date(hoy); a.setDate(a.getDate() - 6); setRepDesde(d(a)); setRepHasta(d(hoy)); }
     else if (tipo === "mes") { const a = new Date(hoy.getFullYear(), hoy.getMonth(), 1); setRepDesde(d(a)); setRepHasta(d(hoy)); }
+    setRepAtajo(tipo);
   };
 
   // Determina la categoría principal de un item vendido (usa la categoría
@@ -805,7 +807,13 @@ export default function App() {
   }, [repTickets]);
 
   const cargarMonitor = useCallback(async () => {
-    const desde = hoyStr() + "T00:00:00";
+    // El "día operativo" va de las 7:00 am de hoy a las 7:00 am de mañana.
+    // Si ahora son antes de las 7 am, el día operativo empezó a las 7 am de AYER.
+    const ahora = new Date();
+    const inicioDia = new Date(ahora);
+    inicioDia.setHours(7, 0, 0, 0);
+    if (ahora.getHours() < 7) inicioDia.setDate(inicioDia.getDate() - 1);
+    const desde = inicioDia.toISOString();
     const resultado = {};
     for (const suc of Object.keys(SUCURSALES)) {
       const [t, p, co] = await Promise.all([
@@ -815,6 +823,13 @@ export default function App() {
       ]);
       const validos = (t.data || []).filter((x) => !x.cancelado);
       const porM = (m) => validos.filter((x) => (x.metodo_pago || "efectivo") === m).reduce((s, x) => s + Number(x.total), 0);
+      // desglose por turno del día operativo (según la hora de cada venta)
+      const porTurno = { 1: { ventas: 0, total: 0 }, 2: { ventas: 0, total: 0 }, 3: { ventas: 0, total: 0 } };
+      validos.forEach((x) => {
+        const tr = turnoActual(new Date(x.fecha));
+        porTurno[tr].ventas++; porTurno[tr].total += Number(x.total);
+      });
+      const turnoAct = turnoActual(ahora); // turno en curso ahora
       resultado[suc] = {
         total: validos.reduce((s, x) => s + Number(x.total), 0),
         efectivo: porM("efectivo"), transferencia: porM("transferencia"), cortesia: porM("cortesia"),
@@ -823,6 +838,7 @@ export default function App() {
         ultimos: (t.data || []).slice(0, 8),
         bajos: (p.data || []).filter((x) => x.stock <= x.stock_min),
         cortes: co.data || [],
+        porTurno, turnoAct,
       };
     }
     setMonitor(resultado);
@@ -2275,7 +2291,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
       {view === "monitoreo" && esAdmin && (
         <div style={S.page} className="no-print">
           <div style={{ fontSize: 12, color: "#8A93A3", marginBottom: 10 }}>
-            Vista en vivo de ambos moteles · se actualiza cada 15 segundos · ventas de hoy ({hoyStr()})
+            Vista en vivo de ambos moteles · se actualiza cada 15 segundos · día operativo (7:00 am a 7:00 am)
           </div>
           {/* Control de turnos abiertos — ambos moteles siempre visibles */}
           <div style={{ ...S.card, marginBottom: 16 }}>
@@ -2328,6 +2344,20 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                           {m.bajos.length > 4 && ` y ${m.bajos.length - 4} más`}
                         </div>
                       )}
+                      {/* Desglose por turno del día operativo (el activo + los anteriores) */}
+                      <div style={{ ...S.kpiLabel, marginTop: 10 }}>Ventas por turno (día 7am–7am)</div>
+                      {m.porTurno && TURNOS.map((tn) => {
+                        const pt = m.porTurno[tn.n] || { ventas: 0, total: 0 };
+                        const esActivo = m.turnoAct === tn.n;
+                        return (
+                          <div key={tn.n} style={{ ...S.corteRow, fontSize: 13, background: esActivo ? "#FFFBEB" : "transparent", borderRadius: esActivo ? 6 : 0, padding: esActivo ? "4px 6px" : undefined }}>
+                            <span style={{ fontWeight: esActivo ? 800 : 400 }}>
+                              {esActivo ? "▶ " : ""}{tn.nombre} <span style={{ color: "#8A93A3", fontSize: 11 }}>({tn.rango})</span>{esActivo ? " · EN CURSO" : ""}
+                            </span>
+                            <b>{money(pt.total)} · {pt.ventas} v</b>
+                          </div>
+                        );
+                      })}
                       <div style={{ ...S.kpiLabel, marginTop: 10 }}>Últimas ventas</div>
                       {m.ultimos.length === 0 && <div style={{ fontSize: 13, color: "#8A93A3", padding: "6px 0" }}>Sin ventas hoy todavía.</div>}
                       {m.ultimos.map((t) => (
@@ -4213,12 +4243,12 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
             <div style={{ fontSize: 13, color: "#8A93A3", marginBottom: 12 }}>Elige el periodo y genera el reporte. Puedes verlo, imprimirlo o descargarlo.</div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
               {[["hoy", "Hoy"], ["ayer", "Ayer"], ["semana", "Últimos 7 días"], ["mes", "Este mes"]].map(([k, label]) => (
-                <button key={k} style={S.catChip} onClick={() => atajoFecha(k)}>{label}</button>
+                <button key={k} style={{ ...S.catChip, ...(repAtajo === k ? { background: "#14213D", color: "#fff", borderColor: "#14213D" } : {}) }} onClick={() => atajoFecha(k)}>{label}</button>
               ))}
             </div>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-              <div><label style={S.label}>Desde</label><input type="date" style={S.input} value={repDesde} onChange={(e) => setRepDesde(e.target.value)} /></div>
-              <div><label style={S.label}>Hasta</label><input type="date" style={S.input} value={repHasta} onChange={(e) => setRepHasta(e.target.value)} /></div>
+              <div><label style={S.label}>Desde</label><input type="date" style={S.input} value={repDesde} onChange={(e) => { setRepDesde(e.target.value); setRepAtajo(""); }} /></div>
+              <div><label style={S.label}>Hasta</label><input type="date" style={S.input} value={repHasta} onChange={(e) => { setRepHasta(e.target.value); setRepAtajo(""); }} /></div>
               <button style={S.payBtn} disabled={repCargando} onClick={cargarReporte}>{repCargando ? "Cargando…" : "📊 Generar reporte"}</button>
             </div>
             {repTickets.length > 0 && (
