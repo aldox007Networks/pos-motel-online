@@ -84,9 +84,14 @@ function Barcode39({ value, height = 54, narrow = 2 }) {
 }
 
 /* ---------- utilidades ---------- */
+// Zona horaria fija del negocio (Tepic/Mazatlán, UTC-7). Forzamos SIEMPRE
+// esta zona al mostrar fechas y horas, para que no dependa de cómo esté
+// configurado el reloj/zona de la PC de la caja. Así nunca se desfasa
+// (ej. mostrar 9:32 p.m. cuando son las 9:32 a.m.).
+const TZ = "America/Mazatlan";
 const money = (n) => Number(n || 0).toLocaleString("es-MX", { style: "currency", currency: "MXN" });
 const hoyStr = (d = new Date()) => d.toISOString().slice(0, 10);
-const horaStr = (iso) => new Date(iso).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
+const horaStr = (iso) => new Date(iso).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", timeZone: TZ });
 const rolLabel = (rol) => rol === "propietario" ? "Propietario" : rol === "admin" ? "Supervisor" : "Cajera";
 // Iniciales de un nombre para el ticket del huésped (no expone el nombre completo)
 const iniciales = (nombre) => String(nombre || "").trim().split(/\s+/).map((p) => p[0] || "").join("").slice(0, 3).toUpperCase() || "—";
@@ -117,18 +122,38 @@ const inventarioAgrupado = (inventario, fila) => {
   });
   return L;
 };
-const fechaLarga = (iso) => new Date(iso).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" });
+const fechaLarga = (iso) => new Date(iso).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short", timeZone: TZ });
 
 const TURNOS = [
   { n: 1, nombre: "Turno Matutino", rango: "07:00 – 15:00" },
   { n: 2, nombre: "Turno Diurno", rango: "15:00 – 23:00" },
   { n: 3, nombre: "Turno Nocturno", rango: "23:00 – 07:00" },
 ];
+// Hora (0-23) de una fecha EN LA ZONA DEL NEGOCIO, sin importar la zona
+// configurada en la PC de la caja. Así el turno siempre se calcula bien.
+const horaEnTZ = (d = new Date()) =>
+  Number(new Intl.DateTimeFormat("en-US", { hour: "2-digit", hour12: false, timeZone: TZ }).format(d));
 const turnoActual = (d = new Date()) => {
-  const h = d.getHours();
+  const h = horaEnTZ(d);
   if (h >= 7 && h < 15) return 1;
   if (h >= 15 && h < 23) return 2;
   return 3;
+};
+
+// Devuelve el inicio del día operativo (7:00 am zona negocio) como ISO/UTC,
+// para filtrar ventas del día actual sin importar la zona de la PC. Mazatlán
+// no tiene horario de verano (offset fijo -7), así que basta restar 7 horas
+// para "pensar" en hora local y volver a UTC.
+const inicioDiaOperativo = (ahora = new Date()) => {
+  const OFFSET_MIN = 7 * 60; // UTC-7 fijo (Mazatlán, sin horario de verano)
+  // "ahora" desplazado a hora local: sus campos UTC ya representan hora Mazatlán
+  const local = new Date(ahora.getTime() - OFFSET_MIN * 60000);
+  const y = local.getUTCFullYear(), mo = local.getUTCMonth(), da = local.getUTCDate();
+  // 7:00 am local de ese día (si aún no son las 7 am local, retrocede un día)
+  let inicioLocal = Date.UTC(y, mo, da, 7, 0, 0, 0);
+  if (local.getTime() < inicioLocal) inicioLocal -= 24 * 3600 * 1000;
+  // volver de hora local a UTC real sumando el offset
+  return new Date(inicioLocal + OFFSET_MIN * 60000).toISOString();
 };
 
 const descargar = (nombreArchivo, contenido, tipo = "text/plain") => {
@@ -807,13 +832,11 @@ export default function App() {
   }, [repTickets]);
 
   const cargarMonitor = useCallback(async () => {
-    // El "día operativo" va de las 7:00 am de hoy a las 7:00 am de mañana.
-    // Si ahora son antes de las 7 am, el día operativo empezó a las 7 am de AYER.
+    // El "día operativo" va de las 7:00 am de hoy a las 7:00 am de mañana,
+    // en la zona del NEGOCIO (no la de la PC). Si en Mazatlán aún no son las
+    // 7 am, el día operativo empezó a las 7 am de AYER.
     const ahora = new Date();
-    const inicioDia = new Date(ahora);
-    inicioDia.setHours(7, 0, 0, 0);
-    if (ahora.getHours() < 7) inicioDia.setDate(inicioDia.getDate() - 1);
-    const desde = inicioDia.toISOString();
+    const desde = inicioDiaOperativo(ahora);
     const resultado = {};
     for (const suc of Object.keys(SUCURSALES)) {
       const [t, p, co] = await Promise.all([
@@ -1829,7 +1852,7 @@ export default function App() {
   const comprobanteTraspaso = (t) => {
     const suc = SUCURSALES[t.sucursal];
     const marca = "#14213D";
-    const fechaImp = new Date(t.fecha || Date.now()).toLocaleString("es-MX", { dateStyle: "full", timeStyle: "short" });
+    const fechaImp = new Date(t.fecha || Date.now()).toLocaleString("es-MX", { dateStyle: "full", timeStyle: "short", timeZone: TZ });
     const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Vale de traspaso ${escHTML(folioTras(t))}</title>
       <style>
         @page { size: letter; margin: 16mm; }
@@ -1923,7 +1946,7 @@ export default function App() {
     const filasDetalle = lista.map((t, i) => `<tr>
       <td class="c">${i + 1}</td>
       <td class="mono">${escHTML(folioTras(t))}</td>
-      <td>${escHTML(new Date(t.fecha).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" }))}</td>
+      <td>${escHTML(new Date(t.fecha).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short", timeZone: TZ }))}</td>
       <td class="mono">${escHTML(t.codigo)}</td>
       <td>${escHTML(t.nombre)}</td>
       <td class="c b">${escHTML(t.cantidad)}</td>
@@ -1965,7 +1988,7 @@ export default function App() {
         <div class="meta">
           <div style="font-weight:800;font-size:13px;color:${marca}">INFORME DE TRASPASOS</div>
           <div>${escHTML(rangoTxt)}</div>
-          <div>Generado: <b>${escHTML(new Date().toLocaleString("es-MX", { dateStyle: "medium", timeStyle: "short" }))}</b> · ${escHTML(perfil?.nombre || "")}</div>
+          <div>Generado: <b>${escHTML(new Date().toLocaleString("es-MX", { dateStyle: "medium", timeStyle: "short", timeZone: TZ }))}</b> · ${escHTML(perfil?.nombre || "")}</div>
         </div>
       </div>
       <div class="resumen">
@@ -2007,7 +2030,7 @@ export default function App() {
     ).slice().sort((a, b) => String(a.categoria || "zzz").localeCompare(String(b.categoria || "zzz")) || a.nombre.localeCompare(b.nombre));
 
     const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const fechaImp = new Date().toLocaleString("es-MX", { dateStyle: "full", timeStyle: "short" });
+    const fechaImp = new Date().toLocaleString("es-MX", { dateStyle: "full", timeStyle: "short", timeZone: TZ });
 
     let totalU = 0, totalValor = 0, agotados = 0, bajos = 0;
     const filas = lista.map((p, i) => {
