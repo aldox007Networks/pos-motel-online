@@ -856,6 +856,16 @@ export default function App() {
       const { data: pend } = await supabase.from("tickets").select("*").eq("sucursal", t.sucursal).is("corte_id", null);
       const lista = pend || [];
       const validos = lista.filter((x) => !x.cancelado);
+      // Candado anti-corte-vacío al forzar: si NO hay ventas pendientes,
+      // es que ese turno YA se cortó. Forzar el cierre aquí solo generaría
+      // un corte en $0 basura. Mejor avisamos y solo liberamos la caja.
+      if (lista.length === 0) {
+        if (!window.confirm(`El turno de ${t.cajera_nombre} NO tiene ventas pendientes — probablemente ya hizo su corte.\n\n¿Solo quieres LIBERAR la caja (sin generar un corte en $0)?`)) return;
+        await supabase.from("turnos_abiertos").delete().eq("sucursal", t.sucursal);
+        setTurnosAbiertos((xs) => xs.filter((x) => x.sucursal !== t.sucursal));
+        setErrorMsg(`✓ Caja de ${SUCURSALES[t.sucursal]?.corto} liberada (sin corte, no había ventas pendientes).`);
+        return;
+      }
       const { data: prods } = await supabase.from("productos").select("nombre,codigo,stock,categoria").eq("sucursal", t.sucursal);
       const porMetodoF = (m) => validos.filter((x) => (x.metodo_pago || "efectivo") === m).reduce((s, x) => s + Number(x.total), 0);
       // resumen por categoría principal (solo efectivo + transferencia)
@@ -873,6 +883,7 @@ export default function App() {
       const porCategoria = Object.entries(accCat).sort((a, b) => ordenCat.indexOf(a[0]) - ordenCat.indexOf(b[0])).map(([nombre, total]) => ({ nombre, total }));
       const corte = {
         sucursal: t.sucursal, turno: t.turno || turnoActual(), cajera: t.cajera_nombre + " (cierre forzado)",
+        abierto_en: t.created_at || null,
         total: validos.reduce((s, x) => s + Number(x.total), 0),
         total_efectivo: porMetodoF("efectivo"), total_transferencia: porMetodoF("transferencia"), total_cortesia: porMetodoF("cortesia"),
         por_categoria: porCategoria,
