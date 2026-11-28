@@ -2018,6 +2018,108 @@ export default function App() {
     imprimirHTMLCarta(html);
   };
 
+  // Reporte "Detalles de la Venta" de un corte: lista ticket por ticket qué
+  // se vendió, cuánto se cobró y a qué habitación, más los datos del corte
+  // (cajera, turno, fecha). Tamaño carta, imprimible.
+  const reporteDetalleVenta = async (c) => {
+    setErrorMsg("");
+    // Traer los tickets que pertenecen a este corte (por corte_id).
+    const { data, error } = await supabase.from("tickets").select("*")
+      .eq("corte_id", c.id).order("folio", { ascending: true });
+    if (error) { setErrorMsg("No se pudo generar el reporte: " + error.message); return; }
+    const tks = (data || []);
+    if (!tks.length) { setErrorMsg("Este corte no tiene ventas con detalle (fue un corte sin ventas)."); return; }
+
+    const marca = SUCURSALES[c.sucursal]?.color || "#14213D";
+    const tn = TURNOS.find((t) => t.n === c.turno);
+    const metodoTxt = { efectivo: "Efectivo", transferencia: "Transferencia", cortesia: "Cortesía" };
+    let totGeneral = 0, totArticulos = 0;
+
+    // Un bloque por ticket: encabezado (folio, habitación, hora, método) +
+    // renglones de cada artículo (cantidad, precio unitario, importe).
+    const bloques = tks.map((t) => {
+      const cancel = !!t.cancelado;
+      const items = Array.isArray(t.items) ? t.items : [];
+      const filas = items.map((it) => {
+        const cant = Number(it.cant || 0);
+        const precio = Number(it.precio || 0);
+        const imp = cant * precio;
+        if (!cancel) totArticulos += cant;
+        return `<tr>
+          <td>${escHTML(it.nombre)}</td>
+          <td class="c">${escHTML(cant)}</td>
+          <td class="r">${money(precio)}</td>
+          <td class="r b">${money(imp)}</td>
+        </tr>`;
+      }).join("");
+      // combos aplicados (si los hay) como nota del ticket
+      const combos = Array.isArray(t.combos_aplicados) && t.combos_aplicados.length
+        ? `<div class="combo">🎁 Combo: ${t.combos_aplicados.map((k) => escHTML(k.nombre) + (k.veces > 1 ? ` x${k.veces}` : "")).join(", ")}</div>` : "";
+      if (!cancel) totGeneral += Number(t.total || 0);
+      return `<div class="tk ${cancel ? "cancel" : ""}">
+        <div class="tkhead">
+          <div><span class="folio">#${String(t.folio).padStart(4, "0")}</span> · <b>${escHTML(t.habitacion || "—")}</b>${cancel ? ' <span class="xcancel">CANCELADO</span>' : ""}</div>
+          <div class="tkmeta">${escHTML(horaStr(t.fecha))} · ${escHTML(metodoTxt[t.metodo_pago] || "Efectivo")}</div>
+        </div>
+        <table class="items">
+          <thead><tr><th>Artículo</th><th class="c">Cant.</th><th class="r">P. Unit.</th><th class="r">Importe</th></tr></thead>
+          <tbody>${filas}</tbody>
+          <tfoot><tr><td colspan="3" class="r">Total del ticket</td><td class="r b">${money(t.total)}</td></tr></tfoot>
+        </table>
+        ${combos}
+      </div>`;
+    }).join("");
+
+    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Detalles de la Venta</title>
+      <style>
+        @page { size: letter; margin: 12mm 10mm 14mm; }
+        * { box-sizing: border-box; }
+        body { font-family:-apple-system,"Segoe UI",Arial,sans-serif; color:#111; margin:0; font-size:11px; }
+        .head { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:3px solid ${marca}; padding-bottom:8px; margin-bottom:10px; }
+        .brand { font-size:20px; font-weight:800; color:${marca}; } .brand small { display:block; font-size:11px; font-weight:600; color:#444; margin-top:2px; }
+        .meta { text-align:right; font-size:11px; color:#333; line-height:1.5; }
+        .resumen { display:flex; gap:10px; margin:0 0 14px; }
+        .chip { flex:1; border:1px solid #D7DCE5; border-radius:8px; padding:7px 10px; }
+        .chip .k { font-size:10px; color:#667; text-transform:uppercase; } .chip .v { font-size:15px; font-weight:800; }
+        .tk { border:1px solid #D7DCE5; border-radius:8px; padding:8px 10px; margin-bottom:9px; break-inside:avoid; }
+        .tk.cancel { opacity:.6; }
+        .tkhead { display:flex; justify-content:space-between; align-items:center; margin-bottom:5px; }
+        .folio { font-family:ui-monospace,monospace; font-weight:800; color:${marca}; }
+        .tkmeta { font-size:10px; color:#556; }
+        .xcancel { background:#C0392B; color:#fff; font-size:9px; padding:1px 5px; border-radius:4px; font-weight:800; }
+        table.items { width:100%; border-collapse:collapse; }
+        table.items thead th { background:${marca}; color:#fff; font-size:9px; text-transform:uppercase; padding:4px 5px; text-align:left; }
+        table.items tbody td { border-bottom:1px solid #EEF0F4; padding:4px 5px; }
+        table.items tfoot td { padding:5px; font-weight:800; border-top:1px solid ${marca}; background:#F4F6F9; }
+        .combo { font-size:10px; color:#556; margin-top:4px; font-style:italic; }
+        .c { text-align:center; } .r { text-align:right; } .b { font-weight:800; }
+        .totbar { display:flex; justify-content:space-between; align-items:center; margin-top:10px; border-top:2px solid ${marca}; padding-top:8px; }
+        .totbar .big { font-size:20px; font-weight:900; color:${marca}; }
+        .pie { margin-top:14px; font-size:9px; color:#889; text-align:center; }
+      </style></head><body>
+      <div class="head">
+        <div class="brand">iPOS<small>Aldox Networks ® · ${escHTML(SUCURSALES[c.sucursal]?.nombre || "")}</small></div>
+        <div class="meta">
+          <div style="font-weight:800;font-size:13px;color:${marca}">DETALLES DE LA VENTA</div>
+          <div>Corte de caja</div>
+          <div>Impreso: <b>${escHTML(new Date().toLocaleString("es-MX", { dateStyle: "medium", timeStyle: "short", timeZone: TZ }))}</b></div>
+        </div>
+      </div>
+      <div class="resumen">
+        <div class="chip"><div class="k">Cajera</div><div class="v">${escHTML(c.cajera)}</div></div>
+        <div class="chip"><div class="k">Turno</div><div class="v">${escHTML(tn ? tn.nombre : "T" + c.turno)}</div></div>
+        <div class="chip"><div class="k">Fecha del corte</div><div class="v" style="font-size:12px">${escHTML(fechaLarga(c.fecha))}</div></div>
+      </div>
+      ${bloques}
+      <div class="totbar">
+        <div>${tks.length} ticket(s) · ${totArticulos} artículo(s) vendido(s)</div>
+        <div class="big">${money(totGeneral)}</div>
+      </div>
+      <div class="pie">iPOS · Aldox Networks ® — Detalle de ventas del corte · ${escHTML(c.cajera)} · ${escHTML(tn ? tn.nombre : "T" + c.turno)} · ${escHTML(fechaLarga(c.fecha))}</div>
+      </body></html>`;
+    imprimirHTMLCarta(html);
+  };
+
   const reporteInventario = (tipo) => {
     const esAlm = tipo === "almacen";
     const titulo = esAlm ? "REPORTE DE ALMACÉN GENERAL" : `REPORTE DE INVENTARIO · ${marcaActiva.nombre}`;
@@ -4619,6 +4721,7 @@ VITE_SUCURSAL   (barcelona | amsterdam)`}
                     <td style={{ ...S.td, textAlign: "center" }}>{c.num_ventas} ventas</td>
                     <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}>
                       <button style={S.miniBtn} onClick={() => setCorteVista(c)}>👁 Ver / imprimir</button>{" "}
+                      <button style={S.miniBtn} onClick={() => reporteDetalleVenta(c)}>🧾 Detalles de la Venta</button>{" "}
                       <button style={S.miniBtn} onClick={() => descargarCorte(c)}>⬇ Descargar</button>
                     </td>
                   </tr>
